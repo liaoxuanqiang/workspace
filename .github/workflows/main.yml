@@ -31,17 +31,9 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 5
-          $rawPassword += $charSet.Lower | Get-Random -Count 5
-          $rawPassword += $charSet.Number | Get-Random -Count 6
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          # 生成 8 位纯数字密码
+          $digits = [char[]](48..57)  # 0-9
+          $password = -join ($digits | Get-Random -Count 8)
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "liaox" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "liaox"
