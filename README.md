@@ -21,6 +21,14 @@
 - Name: `TAILSCALE_AUTH_KEY`
 - Value: 你的 Auth Key
 
+### 2. RDP 用户名
+
+在 GitHub 仓库中添加 Secret：
+
+- **Settings → Secrets and variables → Actions → New repository secret**
+- Name: `RDP_USERNAME`
+- Value: 你想要的 RDP 登录用户名（例如 `liaox`）
+
 ### 2. 本机安装 Tailscale
 
 用于连接 Runner 的客户端设备也需要安装 Tailscale 并登录同一账号。
@@ -47,7 +55,7 @@ Password:  <随机生成的密码>
 
 | 项目 | 值 |
 |------|-----|
-| 用户名 | `liaox` |
+| 用户名 | 由 Secret `RDP_USERNAME` 配置 |
 | 密码 | 每次运行随机生成（8 位，包含大小写字母和数字） |
 | 地址 | Tailscale 分配的虚拟 IP（运行日志中查看） |
 | 端口 | 3389 |
