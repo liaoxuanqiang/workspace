@@ -50,7 +50,9 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "liaox"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "liaox"
           
-          echo "RDP_CREDS=User: liaox | Password: $password" >> $env:GITHUB_ENV
+          # 密码单独存入环境变量，避免输出时混入多余文本
+          echo "RDP_USERNAME=liaox" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
           if (-not (Get-LocalUser -Name "liaox")) {
               Write-Error "User creation failed"
@@ -165,8 +167,8 @@ jobs:
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: liaox"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "Username: $env:RDP_USERNAME"
+          Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "==================`n"
           
           # 保持 runner 持续运行（或直到手动取消）
