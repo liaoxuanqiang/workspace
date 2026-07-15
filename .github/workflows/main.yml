@@ -31,6 +31,12 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
+          # 关闭 Windows 密码复杂性策略，允许纯数字密码
+          secedit /export /cfg "$env:TEMP\secpol.cfg"
+          (Get-Content "$env:TEMP\secpol.cfg") -replace 'PasswordComplexity = 1', 'PasswordComplexity = 0' | Set-Content "$env:TEMP\secpol.cfg"
+          secedit /configure /db "$env:TEMP\secpol.sdb" /cfg "$env:TEMP\secpol.cfg" /quiet
+          net accounts /minpwlen:8
+
           # 生成 8 位纯数字密码
           $digits = [char[]](48..57)  # 0-9
           $password = -join ($digits | Get-Random -Count 8)
