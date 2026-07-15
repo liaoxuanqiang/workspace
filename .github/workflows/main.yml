@@ -32,6 +32,7 @@ jobs:
       - name: Create RDP User with Secure Password
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           # 验证 RDP_USERNAME 是否已配置
           if (-not $env:RDP_USERNAME) {
@@ -40,27 +41,18 @@ jobs:
           }
           Write-Host "RDP_USERNAME is configured: $env:RDP_USERNAME"
 
-          # 生成 8 位密码，确保包含大小写字母和数字，满足密码复杂性要求
-          $upper = [char[]](65..90)   # A-Z
-          $lower = [char[]](97..122)  # a-z
-          $digit = [char[]](48..57)   # 0-9
-          $all   = $upper + $lower + $digit
+          # 验证 RDP_PASSWORD 是否已配置
+          if (-not $env:RDP_PASSWORD) {
+              Write-Error "RDP_PASSWORD is not configured in GitHub Secrets. Please add it."
+              exit 1
+          }
+          Write-Host "RDP_PASSWORD is configured."
 
-          # 确保至少包含 1 大写、1 小写、1 数字，其余 5 位随机
-          $password = -join ((
-            ($upper | Get-Random -Count 1) +
-            ($lower | Get-Random -Count 1) +
-            ($digit | Get-Random -Count 1) +
-            ($all   | Get-Random -Count 5)
-          ) | Sort-Object { Get-Random })
-
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          # 直接使用来自 Secrets 的密码创建用户
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME
-          
-          # 密码单独存入环境变量，避免输出时混入多余文本
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
           if (-not (Get-LocalUser -Name $env:RDP_USERNAME)) {
               Write-Error "User creation failed"
@@ -174,6 +166,7 @@ jobs:
       - name: Maintain Connection
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"

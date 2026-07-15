@@ -5,7 +5,7 @@
 ## 工作原理
 
 1. **配置 RDP** — 修改注册表启用远程桌面，禁用网络级身份认证（NLA），开放 3389 端口防火墙规则
-2. **创建用户** — 自动创建管理员用户 `liaox`，密码为 8 位（大小写字母 + 数字）
+2. **创建用户** — 使用在 GitHub Secrets 中配置的用户名和密码自动创建管理员用户
 3. **安装 Tailscale** — 下载并静默安装 Tailscale 客户端
 4. **连接 Tailscale 并开启功能** — 使用 Auth Key 一次性登录 Tailscale 网络，自动检测子网并开启 Subnet Router 和 Exit Node，`--unattended` 确保以系统服务运行，用户切换不影响连接
 5. **验证连通性** — 测试 3389 端口 TCP 连接是否正常
@@ -29,7 +29,15 @@
 - Name: `RDP_USERNAME`
 - Value: 你想要的 RDP 登录用户名（例如 `liaox`）
 
-### 2. 本机安装 Tailscale
+### 3. RDP 密码
+
+在 GitHub 仓库中添加 Secret：
+
+- **Settings → Secrets and variables → Actions → New repository secret**
+- Name: `RDP_PASSWORD`
+- Value: 你想要的 RDP 登录密码（需满足 Windows 密码复杂性要求：大小写字母 + 数字）
+
+### 4. 本机安装 Tailscale
 
 用于连接 Runner 的客户端设备也需要安装 Tailscale 并登录同一账号。
 
@@ -43,8 +51,8 @@
 ```
 === RDP ACCESS ===
 Address:   <Tailscale IP>
-Username:  liaox
-Password:  <随机生成的密码>
+Username:  <你配置的用户名>
+Password:  <你配置的密码>
 ==================
 ```
 
@@ -56,7 +64,7 @@ Password:  <随机生成的密码>
 | 项目 | 值 |
 |------|-----|
 | 用户名 | 由 Secret `RDP_USERNAME` 配置 |
-| 密码 | 每次运行随机生成（8 位，包含大小写字母和数字） |
+| 密码 | 由 Secret `RDP_PASSWORD` 配置 |
 | 地址 | Tailscale 分配的虚拟 IP（运行日志中查看） |
 | 端口 | 3389 |
 | 最大时长 | 3600 分钟（60 小时），超时自动断开 |
@@ -88,7 +96,7 @@ rdp/
 - ⚠️ 此方案仅用于学习和测试，不建议用于生产环境
 - ⚠️ 禁用 NLA 会降低安全性，请确保仅通过 Tailscale 网络访问
 - ⚠️ GitHub Actions Runner 最长运行 6 小时（免费账号），`timeout-minutes` 设为 3600 以最大化利用
-- ⚠️ 每次运行会重新生成密码，请从日志中获取最新凭据
+- ⚠️ 每次运行使用你在 Secrets 中预设的固定凭据，无需从日志获取
 - 🔑 确保客户端设备与 Runner 处于同一 Tailscale 网络中
 
 ## 终止连接
