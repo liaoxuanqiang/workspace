@@ -57,28 +57,12 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # 获取本机所有网卡的 IPv4 地址，用于 Subnet Router
-          $localIPs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' }
-          
-          # 计算需要广播的子网路由
-          $subnets = @()
-          foreach ($ip in $localIPs) {
-              $cidr = (Get-NetIPAddress -IPAddress $ip.IPAddress -AddressFamily IPv4).PrefixLength
-              $subnets += "$($ip.IPAddress)/$cidr"
-          }
-          $advertiseRoutes = $subnets -join ','
-          Write-Host "Advertise Routes: $advertiseRoutes"
-
-          # 使用认证密钥启动 Tailscale，同时开启 Subnet Router 和 Exit Node
+          # 步骤1：使用认证密钥登录 Tailscale
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname=gh-runner-$env:GITHUB_RUN_ID `
-            --advertise-routes="$advertiseRoutes" `
-            --advertise-exit-node `
-            --accept-routes `
-            --accept-dns=false
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          # 等待 Tailscale 分配 IP
+          # 等待 Tailscale 分配 IP，确认认证登录成功
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -92,7 +76,29 @@ jobs:
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale connected, IP: $tsIP"
+
+      - name: Enable Subnet Router and Exit Node
+        run: |
+          # 步骤2：登录认证完成后，获取本机子网并开启 Subnet Router 和 Exit Node
+          $localIPs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' }
           
+          $subnets = @()
+          foreach ($ip in $localIPs) {
+              $cidr = (Get-NetIPAddress -IPAddress $ip.IPAddress -AddressFamily IPv4).PrefixLength
+              $subnets += "$($ip.IPAddress)/$cidr"
+          }
+          $advertiseRoutes = $subnets -join ','
+          Write-Host "Advertise Routes: $advertiseRoutes"
+
+          # 重新执行 tailscale up 开启 Subnet Router 和 Exit Node（此时已认证，无需再传 authkey）
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --advertise-routes="$advertiseRoutes" `
+            --advertise-exit-node `
+            --accept-routes `
+            --accept-dns=false `
+            --reset
+
           # 输出 Tailscale 状态确认功能已开启
           Write-Host "=== Tailscale Status ==="
           & "$env:ProgramFiles\Tailscale\tailscale.exe" status
