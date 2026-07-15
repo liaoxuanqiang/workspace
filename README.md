@@ -5,9 +5,9 @@
 ## 工作原理
 
 1. **配置 RDP** — 修改注册表启用远程桌面，禁用网络级身份认证（NLA），开放 3389 端口防火墙规则
-2. **创建用户** — 自动创建管理员用户 `liaox`，密码由大小写字母 + 数字随机生成（16 位）
+2. **创建用户** — 自动创建管理员用户 `liaox`，密码为 8 位纯数字
 3. **安装 Tailscale** — 下载并静默安装 Tailscale 客户端
-4. **建立连接** — 使用 Auth Key 将 Runner 接入 Tailscale 网络，获取虚拟 IP
+4. **建立连接** — 使用 Auth Key 将 Runner 接入 Tailscale 网络，同时开启 **Subnet Router** 和 **Exit Node** 功能，获取虚拟 IP
 5. **验证连通性** — 测试 3389 端口 TCP 连接是否正常
 6. **保持运行** — 持续输出连接信息并保持 Runner 活跃，直到手动取消
 
@@ -52,6 +52,18 @@ Password:  <随机生成的密码>
 | 地址 | Tailscale 分配的虚拟 IP（运行日志中查看） |
 | 端口 | 3389 |
 | 最大时长 | 3600 分钟（60 小时），超时自动断开 |
+
+## Tailscale 功能说明
+
+### Subnet Router（子网路由）
+- 自动检测 Runner 的所有 IPv4 网卡地址并广播对应子网
+- 允许 Tailscale 网络中的其他设备访问 Runner 所在子网的资源
+
+### Exit Node（出口节点）
+- 将 Runner 作为 Tailscale 网络的出口节点
+- 其他设备可将流量通过此 Runner 转发到互联网
+
+> ⚠️ 需要在 [Tailscale Admin Console](https://login.tailscale.com/admin/machines) 中手动审批 Subnet Router 和 Exit Node 的广播请求
 
 ## 文件结构
 
