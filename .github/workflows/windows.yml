@@ -137,7 +137,7 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale authenticated successfully! IP: $tsIP"
 
-      - name: Set Machine Name and Record IP via Tailscale API
+      - name: Set Machine Name and IP via Tailscale API
         env:
           TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
         run: |
@@ -170,6 +170,7 @@ jobs:
 
           # 查询 tailnet 中所有设备，查找已存在的 "windows" 设备
           Write-Host "Checking for existing devices named 'windows'..."
+          $stillHasConflict = $false
           try {
               $allDevicesResponse = Invoke-RestMethod -Uri "$apiBase/tailnet/-/devices" `
                   -Method Get -Headers $headers
@@ -216,7 +217,22 @@ jobs:
               Write-Warning "Failed to set name: $_"
           }
 
-          # 重新读取实际 Tailscale IP（免费版不支持自定义 IP，只记录自动分配的）
+          # 通过 API 设置机器 IP 为 100.64.1.0
+          Write-Host "Setting machine IP to '100.64.1.0' via Tailscale API..."
+          try {
+              $ipResponse = Invoke-RestMethod -Uri "$apiBase/device/$deviceId/ip" `
+                  -Method Post -Headers $headers `
+                  -Body (@{ "ip" = "100.64.1.0" } | ConvertTo-Json) `
+                  -ContentType "application/json"
+              Write-Host "Machine IP set to 100.64.1.0 successfully."
+              Write-Host "API response: $($ipResponse | ConvertTo-Json -Compress)"
+          } catch {
+              Write-Warning "Failed to set IP via API: $_"
+              Write-Warning "Custom IP assignment may require a Tailscale paid plan (Personal Pro or above)."
+              Write-Warning "Falling back to auto-assigned IP."
+          }
+
+          # 最终确认实际分配的 IP
           $actualIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           if ($actualIP) {
               echo "TAILSCALE_IP=$actualIP" >> $env:GITHUB_ENV
