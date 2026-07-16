@@ -119,7 +119,7 @@ jobs:
           
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale authenticated successfully! IP: $tsIP"
-      - name: Set Machine Name and Record IP via Tailscale API
+      - name: Cleanup Old 'windows' Devices, Set Machine Name and Record IP via Tailscale API
         env:
           TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
         run: |
@@ -185,7 +185,7 @@ jobs:
           } catch {
               Write-Warning "Cleanup check (non-critical): $_"
           }
-          # 尝试设置机器名为 "windows"（自动忽略 name 已被占用的错误）
+          # 设置机器名为 "windows"（旧设备已清理，冲突应已消除）
           Write-Host "Setting machine name to 'windows'..."
           try {
               Invoke-RestMethod -Uri "$apiBase/device/$deviceId/name" `
