@@ -284,6 +284,9 @@ jobs:
           # 输出 Tailscale 状态确认功能已开启
           Write-Host "=== Tailscale Status ==="
           & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "tailscale status 返回退出码 $LASTEXITCODE（机器尚未被 admin 审批，但不影响功能）"
+          }
           Write-Host "Subnet Router and Exit Node enabled."
       
       - name: Verify RDP Accessibility
