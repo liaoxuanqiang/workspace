@@ -138,21 +138,57 @@ jobs:
                   return
               }
           }
-          Write-Host "Device ID: $deviceId"
+          Write-Host "Current device ID: $deviceId"
 
           $apiBase = "https://api.tailscale.com/api/v2"
           $headers = @{ "Authorization" = "Bearer $env:TAILSCALE_API_TOKEN" }
 
-          # 尝试设置机器名为 "windows"（自动忽略 name 已被占用的错误）
-          Write-Host "Setting machine name to 'windows'..."
+          # 查询 tailnet 中所有设备，查找已存在的 "windows" 设备
+          Write-Host "Checking for existing devices named 'windows'..."
+          try {
+              $allDevicesResponse = Invoke-RestMethod -Uri "$apiBase/tailnet/-/devices" `
+                  -Method Get -Headers $headers
+
+              $existingWindowsDevices = $allDevicesResponse.devices | Where-Object { $_.hostname -eq "windows" -or $_.name -eq "windows" }
+
+              foreach ($oldDevice in $existingWindowsDevices) {
+                  $oldId = $oldDevice.id
+                  if ($oldId -eq $deviceId) {
+                      Write-Host "Skipping current device (it's already named 'windows')."
+                      continue
+                  }
+                  Write-Host "Found existing device: $($oldDevice.name) ($oldId). Removing it..."
+                  try {
+                      # 先过期设备（主动断开连接）
+                      Invoke-RestMethod -Uri "$apiBase/device/$oldId/expire" `
+                          -Method Post -Headers $headers | Out-Null
+                      Write-Host "Device $oldId expired successfully."
+                      
+                      # 等待几秒让过期生效
+                      Start-Sleep -Seconds 3
+                      
+                      # 再删除设备
+                      Invoke-RestMethod -Uri "$apiBase/device/$oldId" `
+                          -Method Delete -Headers $headers | Out-Null
+                      Write-Host "Device $oldId removed successfully."
+                  } catch {
+                      Write-Warning "Failed to remove old device $oldId: $_"
+                  }
+              }
+          } catch {
+              Write-Warning "Failed to list devices: $_"
+          }
+
+          # 设置当前设备名为 "windows"
+          Write-Host "Setting this machine's name to 'windows'..."
           try {
               Invoke-RestMethod -Uri "$apiBase/device/$deviceId/name" `
                   -Method Post -Headers $headers `
                   -Body (@{ "name" = "windows" } | ConvertTo-Json) `
                   -ContentType "application/json"
-              Write-Host "Machine name set successfully."
+              Write-Host "Machine name set to 'windows' successfully."
           } catch {
-              Write-Warning "Set name (non-critical): $_"
+              Write-Warning "Failed to set name: $_"
           }
 
           # 重新读取实际 Tailscale IP（免费版不支持自定义 IP，只记录自动分配的）
