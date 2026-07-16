@@ -24,6 +24,11 @@ jobs:
           # 测试用：允许所有 3389 端口的入站连接
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
+          
+          # 放行 8080 端口（HTTP 服务）
+          netsh advfirewall firewall delete rule name="Tailscale-8080"
+          netsh advfirewall firewall add rule name="Tailscale-8080" `
+            dir=in action=allow protocol=TCP localport=8080
           # （可选）重启远程桌面服务使变更生效
           Restart-Service -Name TermService -Force
       - name: Create RDP User with Secure Password
@@ -299,6 +304,42 @@ jobs:
               exit 1
           }
           Write-Host "TCP connectivity successful!"
+      - name: Install and Start llama.cpp
+        run: |
+          Write-Host "Installing llama.cpp..."
+          # 安装 llama.cpp
+          irm https://llama.app/install.ps1 | iex
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "llama.cpp installation failed"
+              exit 1
+          }
+          Write-Host "llama.cpp installed successfully."
+          
+          # 启动 llama.exe serve 作为后台任务（监听 8080 端口）
+          Write-Host "Starting llama.exe serve on port 8080..."
+          $jobScript = {
+              & "llama.exe" serve --port 8080 --host 0.0.0.0
+          }
+          Start-Job -Name "llama-serve" -ScriptBlock $jobScript
+          
+          # 等待几秒确认服务启动
+          Start-Sleep -Seconds 5
+          
+          # 检查服务是否在监听
+          $netstatResult = netstat -an | Select-String ":8080.*LISTENING"
+          if ($netstatResult) {
+              Write-Host "llama.exe serve is listening on port 8080."
+          } else {
+              Write-Warning "llama.exe serve may not be listening yet. Checking job status..."
+              $job = Get-Job -Name "llama-serve" -ErrorAction SilentlyContinue
+              if ($job.State -eq "Failed") {
+                  $errorMsg = Receive-Job -Job $job
+                  Write-Error "llama.exe serve failed: $errorMsg"
+                  exit 1
+              }
+          }
+          
+          Write-Host "llama.cpp server started on port 8080."
       - name: Maintain Connection
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
