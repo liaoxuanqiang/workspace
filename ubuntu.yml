@@ -49,15 +49,14 @@ jobs:
           mkdir -p "$HOME/.vnc"
 
           # vncpasswd 在 Ubuntu 24.04 可能不在 PATH 中，使用 Python 直接生成密码文件
-          python3 -c "
-import os, struct
-pwd = os.environ['VNC_PASSWORD'].encode()[:8].ljust(8, b'\x00')
-# TigerVNC 密码混淆密钥
-key = bytes([23, 82, 107, 55, 103, 33, 189, 76])
-enc = bytes(a ^ b for a, b in zip(pwd, key))
-with open(os.path.expanduser('~/.vnc/passwd'), 'wb') as f:
-    f.write(enc)
-"
+          printf '%s\n' \
+            'import os, struct' \
+            'pwd = os.environ["VNC_PASSWORD"].encode()[:8].ljust(8, b"\x00")' \
+            'key = bytes([23, 82, 107, 55, 103, 33, 189, 76])' \
+            'enc = bytes(a ^ b for a, b in zip(pwd, key))' \
+            'with open(os.path.expanduser("~/.vnc/passwd"), "wb") as f:' \
+            '    f.write(enc)' \
+            | python3
           chmod 600 "$HOME/.vnc/passwd"
 
           # 写入 xstartup 脚本
@@ -282,20 +281,18 @@ with open(os.path.expanduser('~/.vnc/passwd'), 'wb') as f:
 
           # 获取本机 IPv4 地址，计算子网
           # 使用 Python 的 ipaddress 模块（跨版本兼容，无需 ipcalc）
-          ADVERTISE_ROUTES=$(python3 -c "
-import ipaddress, subprocess, sys
-# 解析 ip -4 -o addr show scope global 输出
-out = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'scope', 'global'],
-                     capture_output=True, text=True).stdout
-addrs = []
-for line in out.strip().split(chr(10)):
-    parts = line.strip().split()
-    if len(parts) >= 4:
-        cidr = parts[3]
-        net = ipaddress.IPv4Network(cidr, strict=False)
-        addrs.append(str(net))
-print(','.join(addrs))
-")
+          ADVERTISE_ROUTES=$(printf '%s\n' \
+            'import ipaddress, subprocess, sys' \
+            'out = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"], capture_output=True, text=True).stdout' \
+            'addrs = []' \
+            'for line in out.strip().split(chr(10)):' \
+            '    parts = line.strip().split()' \
+            '    if len(parts) >= 4:' \
+            '        cidr = parts[3]' \
+            '        net = ipaddress.IPv4Network(cidr, strict=False)' \
+            '        addrs.append(str(net))' \
+            'print(",".join(addrs))' \
+            | python3)
           echo "Advertise Routes: $ADVERTISE_ROUTES"
 
           sudo tailscale set \

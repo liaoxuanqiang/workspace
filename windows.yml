@@ -130,6 +130,16 @@ jobs:
           try {
               $allDevices = Invoke-RestMethod -Uri "$apiBase/tailnet/-/devices" `
                   -Method Get -Headers $headers
+              # 重要：从 API 设备列表中解析当前设备的数值型 Device ID
+              # tailscale status --json 的 Self.ID 返回 Stable Node ID（如 nNSNdatHXZ11CNTRL）
+              # 但 Tailscale API v2 的 device 端点要求数值型 Device ID（如 4164901093819459）
+              $currentApiDevice = $allDevices.devices | Where-Object { $_.nodeId -eq $deviceId }
+              if ($currentApiDevice) {
+                  $deviceId = $currentApiDevice.id
+                  Write-Host "Resolved numeric Device ID from API: $deviceId"
+              } else {
+                  Write-Warning "Could not find current device in API device list by nodeId. Will attempt using local ID."
+              }
               $oldWindowsDevices = $allDevices.devices | Where-Object {
                   $_.hostname -eq "windows" -and $_.id -ne $deviceId
               }
@@ -262,14 +272,21 @@ jobs:
           $advertiseRoutes = $subnets -join ','
           Write-Host "Advertise Routes: $advertiseRoutes"
           # 认证完成后，使用 tailscale set 开启 Subnet Router 和 Exit Node（不重置认证状态）
+          # 注意：subnet route / exit node 需要 tailnet admin 在控制台审批，未经审批时 set 命令会返回非零退出码，但设置实际已生效
           & "$env:ProgramFiles\Tailscale\tailscale.exe" set `
             --advertise-routes="$advertiseRoutes" `
             --advertise-exit-node `
             --accept-routes `
             --accept-dns=false
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "tailscale set 返回退出码 $LASTEXITCODE（需在 Tailscale 控制台审批子网路由/出口节点，设置本身已应用）"
+          }
           # 输出 Tailscale 状态确认功能已开启
           Write-Host "=== Tailscale Status ==="
           & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          if ($LASTEXITCODE -ne 0) {
+              Write-Warning "tailscale status 返回退出码 $LASTEXITCODE（机器尚未被 admin 审批，但不影响功能）"
+          }
           Write-Host "Subnet Router and Exit Node enabled."
       
       - name: Verify RDP Accessibility
