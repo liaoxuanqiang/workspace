@@ -156,9 +156,9 @@ jobs:
               Write-Warning "Failed to set machine name: $_"
           }
 
-          # 2. 尝试设置机器 IP 为 100.100.1.1（API 要求 ip 字段为数组格式）
-          Write-Host "Setting machine IP to '100.100.1.1'..."
-          $ipBody = @{ "ip" = @("100.100.1.1") } | ConvertTo-Json
+          # 2. 尝试设置机器 IP 为 100.64.1.1（API 要求 ip 字段为数组格式）
+          Write-Host "Setting machine IP to '100.64.1.1'..."
+          $ipBody = @{ "ip" = @("100.64.1.1") } | ConvertTo-Json
           $ipSetOk = $false
           try {
               $ipResponse = Invoke-RestMethod -Uri "$apiBase/device/$deviceId/ip" `
@@ -166,7 +166,7 @@ jobs:
               Write-Host "Machine IP set successfully: $($ipResponse | ConvertTo-Json)"
               $ipSetOk = $true
           } catch {
-              Write-Warning "Failed to set machine IP to 100.100.1.1: $_"
+              Write-Warning "Failed to set machine IP to 100.64.1.1: $_"
               Write-Host "Will use auto-assigned Tailscale IP instead."
           }
 
@@ -177,24 +177,88 @@ jobs:
               Write-Host "Current Tailscale IP: $actualIP"
           }
 
-          # 4. 获取 MagicDNS 域名（通过 API 获取 tailnet 名称）
-          try {
-              $meResponse = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet/-/settings" `
-                  -Method Get -Headers $headers
-              $tailnetName = $meResponse.MagicDNSEnabled
-              # 从 API 获取 tailnet 的 MagicDNS 基础域名
-              $dnsName = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null | ConvertFrom-Json
-              $magicDNSName = $dnsName.MagicDNSSuffix
-              if ($magicDNSName) {
-                  $fullDNS = "windows.$magicDNSName"
-                  echo "TAILSCALE_DNS=$fullDNS" >> $env:GITHUB_ENV
-                  Write-Host "MagicDNS name: $fullDNS"
-              }
-          } catch {
-              Write-Warning "Could not retrieve MagicDNS name: $_"
+          Write-Host "Tailscale API configuration completed!"
+
+      - name: Ensure MagicDNS is Enabled
+        env:
+          TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
+        run: |
+          # 验证 TAILSCALE_API_TOKEN 是否已配置
+          if ("$env:TAILSCALE_API_TOKEN" -eq "") {
+              Write-Error "TAILSCALE_API_TOKEN is not configured in GitHub Secrets. Please add it."
+              exit 1
           }
 
-          Write-Host "Tailscale API configuration completed!"
+          $apiBase = "https://api.tailscale.com/api/v2"
+          $headers = @{ "Authorization" = "Bearer $env:TAILSCALE_API_TOKEN" }
+
+          # 从本地 tailscale status 获取 tailnet 名称
+          $statusJson = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null
+          $status = $statusJson | ConvertFrom-Json
+          $tailnetDomain = $status.MagicDNSSuffix   # 例如 taila2a33.ts.net
+
+          if (-not $tailnetDomain) {
+              Write-Host "Could not get MagicDNSSuffix from local status. Fetching tailnet name from API..."
+              # 通过设备 API 获取所属 tailnet
+              $deviceId = $status.Self.ID
+              if (-not $deviceId) {
+                  Write-Warning "Cannot determine tailnet. Skipping MagicDNS check."
+                  return
+              }
+              $deviceInfo = Invoke-RestMethod -Uri "$apiBase/device/$deviceId" `
+                  -Method Get -Headers $headers
+              $tailnetDomain = $deviceInfo.tailnetName
+              if (-not $tailnetDomain) {
+                  Write-Warning "Cannot determine tailnet name. Skipping MagicDNS check."
+                  return
+              }
+          }
+
+          # 从域名提取 tailnet ID（去掉 .ts.net 后缀）
+          if ($tailnetDomain -match "^(.+)\.ts\.net$") {
+              $tailnetId = $matches[1]
+          } else {
+              $tailnetId = $tailnetDomain
+          }
+
+          Write-Host "Tailnet: $tailnetId"
+
+          # 查询当前 tailnet 设置，检查 MagicDNS 是否启用
+          try {
+              $settings = Invoke-RestMethod -Uri "$apiBase/tailnet/$tailnetId/settings" `
+                  -Method Get -Headers $headers
+              
+              $magicDnsEnabled = $settings.magicDNSEnabled
+              Write-Host "MagicDNS enabled: $magicDnsEnabled"
+
+              if ($magicDnsEnabled -eq $false) {
+                  Write-Host "MagicDNS is NOT enabled. Enabling now..."
+                  
+                  # 构造启用 MagicDNS 的请求
+                  $updateBody = @{ "magicDNSEnabled" = $true } | ConvertTo-Json
+                  $updateResponse = Invoke-RestMethod -Uri "$apiBase/tailnet/$tailnetId/settings" `
+                      -Method Patch -Headers $headers -Body $updateBody -ContentType "application/json"
+                  
+                  Write-Host "MagicDNS has been enabled successfully! Domain: $tailnetDomain"
+                  
+                  # 重新查询确认
+                  $settingsCheck = Invoke-RestMethod -Uri "$apiBase/tailnet/$tailnetId/settings" `
+                      -Method Get -Headers $headers
+                  Write-Host "MagicDNS enabled (verified): $($settingsCheck.magicDNSEnabled)"
+              } else {
+                  Write-Host "MagicDNS is already enabled. Domain: $tailnetDomain"
+              }
+
+              # 输出 MagicDNS 域名到环境变量
+              $fullDNS = "windows.$tailnetDomain"
+              echo "TAILSCALE_DNS=$fullDNS" >> $env:GITHUB_ENV
+              Write-Host "MagicDNS name: $fullDNS"
+
+          } catch {
+              Write-Warning "Failed to check/enable MagicDNS: $_"
+          }
+
+          Write-Host "MagicDNS check completed!"
 
       - name: Enable Subnet Router and Exit Node
         run: |
