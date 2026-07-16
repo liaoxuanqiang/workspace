@@ -41,19 +41,23 @@ jobs:
             exit 1
           fi
 
-          # vncpasswd 由 tigervnc-common 提供，确保已安装
-          if ! command -v vncpasswd &>/dev/null; then
-            echo "vncpasswd not found, installing tigervnc-common..."
-            sudo apt-get install -y --no-install-recommends tigervnc-common
-          fi
-
           # VNC 显示号 :1 => 监听 5901
           VNC_DISPLAY=":1"
           VNC_PORT=5901
 
           # 以 root 用户写入 VNC 密码文件
           mkdir -p "$HOME/.vnc"
-          printf "%s\n" "$VNC_PASSWORD" | vncpasswd -f > "$HOME/.vnc/passwd"
+
+          # vncpasswd 在 Ubuntu 24.04 可能不在 PATH 中，使用 Python 直接生成密码文件
+          python3 -c "
+import os, struct
+pwd = os.environ['VNC_PASSWORD'].encode()[:8].ljust(8, b'\x00')
+# TigerVNC 密码混淆密钥
+key = bytes([23, 82, 107, 55, 103, 33, 189, 76])
+enc = bytes(a ^ b for a, b in zip(pwd, key))
+with open(os.path.expanduser('~/.vnc/passwd'), 'wb') as f:
+    f.write(enc)
+"
           chmod 600 "$HOME/.vnc/passwd"
 
           # 写入 xstartup 脚本
