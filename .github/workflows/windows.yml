@@ -172,7 +172,7 @@ jobs:
                           -Method Delete -Headers $headers | Out-Null
                       Write-Host "Device $oldId removed successfully."
                   } catch {
-                      Write-Warning "Failed to remove old device $oldId: $_"
+                      Write-Warning ("Failed to remove old device $oldId : $_")
                   }
               }
           } catch {
