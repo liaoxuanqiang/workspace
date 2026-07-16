@@ -18,17 +18,14 @@ jobs:
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
-
           # 删除已有同名规则避免重复
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
           # 测试用：允许所有 3389 端口的入站连接
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
-
           # （可选）重启远程桌面服务使变更生效
           Restart-Service -Name TermService -Force
-
       - name: Create RDP User with Secure Password
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
@@ -40,14 +37,12 @@ jobs:
               exit 1
           }
           Write-Host "RDP_USERNAME is configured: $env:RDP_USERNAME"
-
           # 验证 RDP_PASSWORD 是否已配置
           if (-not $env:RDP_PASSWORD) {
               Write-Error "RDP_PASSWORD is not configured in GitHub Secrets. Please add it."
               exit 1
           }
           Write-Host "RDP_PASSWORD is configured."
-
           # 直接使用来自 Secrets 的密码创建用户
           $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
           New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
@@ -58,7 +53,6 @@ jobs:
               Write-Error "User creation failed"
               exit 1
           }
-
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.98.8-amd64.msi"
@@ -67,17 +61,14 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
-
           # 将 Tailscale 加入系统 PATH，确保所有用户（包括 liaox）都能使用 tailscale 命令
           $tsPath = [Environment]::GetFolderPath('ProgramFiles') + '\Tailscale'
           $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
           if ($currentPath -notlike "*$tsPath*") {
               [Environment]::SetEnvironmentVariable('Path', "$currentPath;$tsPath", 'Machine')
           }
-
           # 确保 Tailscale 服务设为自动启动
           Set-Service -Name Tailscale -StartupType Automatic
-
       - name: Authenticate Tailscale
         run: |
           # 验证 TAILSCALE_AUTH_KEY 是否已配置
@@ -85,40 +76,12 @@ jobs:
               Write-Error "TAILSCALE_AUTH_KEY is not configured in GitHub Secrets. Please add it."
               exit 1
           }
-
           Write-Host "TAILSCALE_AUTH_KEY is configured. Authenticating Tailscale..."
-
-          # 在认证前先计算子网路由（避免后续 tailscale set 导致失联）
-          Write-Host "Calculating subnet routes..."
-          $localIPs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' -and $_.InterfaceAlias -ne 'Tailscale' }
-          $subnets = @()
-          foreach ($ip in $localIPs) {
-              $prefixLen = $ip.PrefixLength
-              $ipBytes = [System.Net.IPAddress]::Parse($ip.IPAddress).GetAddressBytes()
-              [Array]::Reverse($ipBytes)
-              $ipInt = [System.BitConverter]::ToUInt32($ipBytes, 0)
-              $maskInt = [uint32]::MaxValue -shl (32 - $prefixLen)
-              $netInt = $ipInt -band $maskInt
-              $netBytes = [System.BitConverter]::GetBytes($netInt)
-              [Array]::Reverse($netBytes)
-              $networkAddr = [System.Net.IPAddress]::new($netBytes).IPAddressToString
-              $subnet = "$networkAddr/$prefixLen"
-              $subnets += $subnet
-              Write-Host "Interface $($ip.InterfaceAlias): $($ip.IPAddress)/$prefixLen → $subnet"
-          }
-          $advertiseRoutes = $subnets -join ','
-          Write-Host "Advertise Routes: $advertiseRoutes"
-
-          # 使用认证密钥登录 Tailscale，一步完成认证+路由配置，避免后续 tailscale set 导致失联
+          # 使用认证密钥登录 Tailscale，主机名设为 windows（MagicDNS 可用 windows.<tailnet>.ts.net 连接）
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
             --hostname=windows `
-            --unattended `
-            --advertise-routes="$advertiseRoutes" `
-            --advertise-exit-node `
-            --accept-routes `
-            --accept-dns=false
-
+            --unattended
           # 等待 Tailscale 分配 IP
           $tsIP = $null
           $retries = 0
@@ -136,8 +99,7 @@ jobs:
           
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale authenticated successfully! IP: $tsIP"
-
-      - name: Set Machine Name and Record IP via Tailscale API
+      - name: Cleanup Old 'windows' Devices, Set Machine Name and Record IP via Tailscale API
         env:
           TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
         run: |
@@ -146,93 +108,81 @@ jobs:
               Write-Error "TAILSCALE_API_TOKEN is not configured in GitHub Secrets. Please add it."
               exit 1
           }
-
-          Write-Host "TAILSCALE_API_TOKEN is configured."
-
-          # 从本地 tailscale status 获取 Stable Node ID（如 n9tntCXRip11CNTRL）
+          Write-Host "TAILSCALE_API_TOKEN is configured. Getting Device ID from local Tailscale..."
+          # 从本地 tailscale status 获取自身 Device ID
           $statusJson = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null
           $status = $statusJson | ConvertFrom-Json
-          $stableNodeId = $status.Self.ID
-
-          if (-not $stableNodeId) {
-              Write-Warning "Could not determine Stable Node ID. Skipping API configuration."
-              return
+          $deviceId = $status.Self.ID
+          if (-not $deviceId) {
+              Write-Warning "Failed to get Device ID from local Tailscale."
+              $allDevices = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null | ConvertFrom-Json
+              $deviceId = $allDevices.Self.ID
+              if (-not $deviceId) {
+                  Write-Warning "Could not determine Device ID. Skipping API configuration."
+                  return
+              }
           }
-          Write-Host "Local Stable Node ID: $stableNodeId"
-
+          Write-Host "Device ID: $deviceId"
           $apiBase = "https://api.tailscale.com/api/v2"
           $headers = @{ "Authorization" = "Bearer $env:TAILSCALE_API_TOKEN" }
-
-          # 获取 API 设备列表，通过 nodeId（StableID）匹配出当前设备的数值型 Device ID
-          Write-Host "Fetching device list from API to resolve numeric Device ID..."
-          try {
-              $allDevicesResponse = Invoke-RestMethod -Uri "$apiBase/tailnet/-/devices" `
-                  -Method Get -Headers $headers
-          } catch {
-              Write-Warning "Failed to list devices: $_"
-              return
-          }
-
-          $currentDevice = $allDevicesResponse.devices | Where-Object { $_.nodeId -eq $stableNodeId }
-          if (-not $currentDevice) {
-              Write-Warning "Could not find current device in API device list by nodeId '$stableNodeId'."
-              Write-Warning "Available devices: $($allDevicesResponse.devices | ForEach-Object { "$($_.name)($($_.nodeId))" } | Out-String)"
-              return
-          }
-
-          $deviceId = $currentDevice.id
-          Write-Host "Resolved numeric Device ID: $deviceId (name: $($currentDevice.name), nodeId: $($currentDevice.nodeId))"
-
-          # 查询所有设备，查找已存在的 "windows" 设备（排除自身）
+          # 先查询并清理所有机器名为 "windows" 的旧设备（排除当前设备），避免名称冲突
           Write-Host "Checking for existing devices named 'windows'..."
-          $existingWindowsDevices = $allDevicesResponse.devices | Where-Object { $_.hostname -eq "windows" -or $_.name -eq "windows" }
-
-          foreach ($oldDevice in $existingWindowsDevices) {
-              $oldId = $oldDevice.id
-              if ($oldId -eq $deviceId) {
-                  Write-Host "Skipping current device (it's already the 'windows' device)."
-                  continue
+          try {
+              $allDevices = Invoke-RestMethod -Uri "$apiBase/tailnet/-/devices" `
+                  -Method Get -Headers $headers
+              $oldWindowsDevices = $allDevices.devices | Where-Object {
+                  $_.hostname -eq "windows" -and $_.id -ne $deviceId
               }
-              Write-Host "Found existing device: $($oldDevice.name) ($oldId). Removing it..."
-              try {
-                  # 先过期设备（主动断开连接）
-                  Invoke-RestMethod -Uri "$apiBase/device/$oldId/expire" `
-                      -Method Post -Headers $headers | Out-Null
-                  Write-Host "Device $oldId expired successfully."
-
-                  # 等待几秒让过期生效
-                  Start-Sleep -Seconds 3
-
-                  # 再删除设备
-                  Invoke-RestMethod -Uri "$apiBase/device/$oldId" `
-                      -Method Delete -Headers $headers | Out-Null
-                  Write-Host "Device $oldId removed successfully."
-              } catch {
-                  Write-Warning ("Failed to remove old device $oldId : $_")
+              if ($oldWindowsDevices -and $oldWindowsDevices.Count -gt 0) {
+                  Write-Host "Found $($oldWindowsDevices.Count) old device(s) named 'windows'. Cleaning up..."
+                  foreach ($oldDev in $oldWindowsDevices) {
+                      Write-Host "  Processing: $($oldDev.name) (ID: $($oldDev.id))"
+                      # 取消授权
+                      try {
+                          Write-Host "    Deauthorizing..."
+                          Invoke-RestMethod -Uri "$apiBase/device/$($oldDev.id)/authorized" `
+                              -Method Post -Headers $headers `
+                              -Body (@{ "authorized" = $false } | ConvertTo-Json) `
+                              -ContentType "application/json" -ErrorAction Stop
+                          Write-Host "    Deauthorized."
+                      } catch {
+                          Write-Warning "    Deauthorize failed (may already be unauthorized): $_"
+                      }
+                      # 删除设备
+                      try {
+                          Write-Host "    Removing..."
+                          Invoke-RestMethod -Uri "$apiBase/device/$($oldDev.id)" `
+                              -Method Delete -Headers $headers -ErrorAction Stop
+                          Write-Host "    Removed."
+                      } catch {
+                          Write-Warning "    Remove failed: $_"
+                      }
+                  }
+                  Write-Host "Cleanup completed."
+              } else {
+                  Write-Host "No old devices named 'windows' found. Nothing to clean up."
               }
+          } catch {
+              Write-Warning "Cleanup check (non-critical): $_"
           }
-
-          # 设置当前设备名为 "windows"
-          Write-Host "Setting this machine's name to 'windows'..."
+          # 设置机器名为 "windows"（旧设备已清理，冲突应已消除）
+          Write-Host "Setting machine name to 'windows'..."
           try {
               Invoke-RestMethod -Uri "$apiBase/device/$deviceId/name" `
                   -Method Post -Headers $headers `
                   -Body (@{ "name" = "windows" } | ConvertTo-Json) `
                   -ContentType "application/json"
-              Write-Host "Machine name set to 'windows' successfully."
+              Write-Host "Machine name set successfully."
           } catch {
-              Write-Warning "Failed to set name: $_"
+              Write-Warning "Set name (non-critical): $_"
           }
-
           # 重新读取实际 Tailscale IP（免费版不支持自定义 IP，只记录自动分配的）
           $actualIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           if ($actualIP) {
               echo "TAILSCALE_IP=$actualIP" >> $env:GITHUB_ENV
               Write-Host "Current Tailscale IP: $actualIP"
           }
-
           Write-Host "Tailscale API configuration completed!"
-
       - name: Ensure MagicDNS is Enabled
         env:
           TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
@@ -242,15 +192,11 @@ jobs:
               Write-Error "TAILSCALE_API_TOKEN is not configured in GitHub Secrets. Please add it."
               exit 1
           }
-
           $apiBase = "https://api.tailscale.com/api/v2"
           $headers = @{ "Authorization" = "Bearer $env:TAILSCALE_API_TOKEN" }
-
           # 使用 "-" 代表当前 API Token 所属的 tailnet，避免域名解析问题
           $tailnetArg = "-"
-
           Write-Host "Using tailnet: '-' (current API token's tailnet)"
-
           # 查询当前 tailnet 设置，检查 MagicDNS 是否启用
           try {
               $settings = Invoke-RestMethod -Uri "$apiBase/tailnet/$tailnetArg/settings" `
@@ -258,12 +204,10 @@ jobs:
               
               $magicDnsEnabled = $settings.magicDNSEnabled
               Write-Host "MagicDNS enabled: $magicDnsEnabled"
-
               # 从本地 status 获取 MagicDNS 域名
               $statusJson = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null
               $status = $statusJson | ConvertFrom-Json
               $tailnetDomain = $status.MagicDNSSuffix
-
               if ($magicDnsEnabled -eq $false) {
                   Write-Host "MagicDNS is NOT enabled. Enabling now..."
                   
@@ -280,7 +224,6 @@ jobs:
               } else {
                   Write-Host "MagicDNS is already enabled."
               }
-
               # 输出 MagicDNS 域名到环境变量
               if ($tailnetDomain) {
                   $fullDNS = "windows.$tailnetDomain"
@@ -289,13 +232,46 @@ jobs:
               } else {
                   Write-Warning "Could not determine MagicDNS domain."
               }
-
           } catch {
               Write-Warning "Failed to check/enable MagicDNS: $_"
           }
-
           Write-Host "MagicDNS check completed!"
-
+      - name: Enable Subnet Router and Exit Node
+        run: |
+          Write-Host "Tailscale is authenticated. Enabling Subnet Router and Exit Node..."
+          # 获取本机所有网卡的 IPv4 地址，计算正确的子网路由（网络地址）
+          $localIPs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' -and $_.InterfaceAlias -ne 'Tailscale' }
+          
+          $subnets = @()
+          foreach ($ip in $localIPs) {
+              $prefixLen = $ip.PrefixLength
+              # 将 IP 地址转换为 uint32 计算网络地址
+              $ipBytes = [System.Net.IPAddress]::Parse($ip.IPAddress).GetAddressBytes()
+              [Array]::Reverse($ipBytes)
+              $ipInt = [System.BitConverter]::ToUInt32($ipBytes, 0)
+              # 计算子网掩码并得到网络地址
+              $maskInt = [uint32]::MaxValue -shl (32 - $prefixLen)
+              $netInt = $ipInt -band $maskInt
+              $netBytes = [System.BitConverter]::GetBytes($netInt)
+              [Array]::Reverse($netBytes)
+              $networkAddr = [System.Net.IPAddress]::new($netBytes).IPAddressToString
+              $subnet = "$networkAddr/$prefixLen"
+              $subnets += $subnet
+              Write-Host "Interface $($ip.InterfaceAlias): $($ip.IPAddress)/$prefixLen → $subnet"
+          }
+          $advertiseRoutes = $subnets -join ','
+          Write-Host "Advertise Routes: $advertiseRoutes"
+          # 认证完成后，使用 tailscale set 开启 Subnet Router 和 Exit Node（不重置认证状态）
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" set `
+            --advertise-routes="$advertiseRoutes" `
+            --advertise-exit-node `
+            --accept-routes `
+            --accept-dns=false
+          # 输出 Tailscale 状态确认功能已开启
+          Write-Host "=== Tailscale Status ==="
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          Write-Host "Subnet Router and Exit Node enabled."
+      
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
@@ -307,7 +283,6 @@ jobs:
               exit 1
           }
           Write-Host "TCP connectivity successful!"
-
       - name: Maintain Connection
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
