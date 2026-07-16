@@ -31,73 +31,48 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             dbus-x11 x11-utils firefox espeak ipcalc jq
 
-      - name: Create desktop user
-        env:
-          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          if [ -z "$RDP_USERNAME" ]; then
-            echo "::error::RDP_USERNAME is not configured in GitHub Secrets."
-            exit 1
-          fi
-          if [ -z "$RDP_PASSWORD" ]; then
-            echo "::error::RDP_PASSWORD is not configured in GitHub Secrets."
-            exit 1
-          fi
-          echo "RDP_USERNAME=$RDP_USERNAME" >> "$GITHUB_ENV"
-
-          # 创建用户（如已存在则跳过），加入 sudo 组并免密
-          if ! id -u "$RDP_USERNAME" >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash -G sudo "$RDP_USERNAME"
-          fi
-          echo "$RDP_USERNAME:$RDP_PASSWORD" | sudo chpasswd
-          echo "$RDP_USERNAME ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$RDP_USERNAME"
-
       - name: Configure TigerVNC server
         env:
-          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
+          # 验证 VNC_PASSWORD 是否已配置
+          if [ -z "$VNC_PASSWORD" ]; then
+            echo "::error::VNC_PASSWORD is not configured in GitHub Secrets. Please add it."
+            exit 1
+          fi
+
           # VNC 显示号 :1 => 监听 5901
           VNC_DISPLAY=":1"
           VNC_PORT=5901
 
-          # 以目标用户身份写入 VNC 密码文件
-          sudo -u "$RDP_USERNAME" -H bash -c '
-            mkdir -p "$HOME/.vnc"
-            printf "%s\n" "'"$RDP_PASSWORD"'" | vncpasswd -f > "$HOME/.vnc/passwd"
-            chmod 600 "$HOME/.vnc/passwd"
-          '
+          # 以 root 用户写入 VNC 密码文件
+          mkdir -p "$HOME/.vnc"
+          printf "%s\n" "$VNC_PASSWORD" | vncpasswd -f > "$HOME/.vnc/passwd"
+          chmod 600 "$HOME/.vnc/passwd"
 
-          # 写入 xstartup 脚本（先写到临时文件，再安装到用户家目录）
+          # 写入 xstartup 脚本
           printf '%s\n' \
             '#!/bin/bash' \
             'unset SESSION_MANAGER' \
             'unset DBUS_SESSION_BUS_ADDRESS' \
             'export XDG_SESSION_TYPE=x11' \
-            'exec startxfce4' > /tmp/xstartup
-          sudo install -d -o "$RDP_USERNAME" -g "$RDP_USERNAME" "/home/$RDP_USERNAME/.vnc"
-          sudo install -m 755 -o "$RDP_USERNAME" -g "$RDP_USERNAME" \
-            /tmp/xstartup "/home/$RDP_USERNAME/.vnc/xstartup"
+            'exec startxfce4' > "$HOME/.vnc/xstartup"
+          chmod 755 "$HOME/.vnc/xstartup"
 
           # 写入 VNC 配置（分辨率、色深、仅监听 localhost）
           printf '%s\n' \
             'geometry=1280x720' \
             'depth=24' \
-            'localhost=yes' > /tmp/vnc-config
-          sudo install -m 644 -o "$RDP_USERNAME" -g "$RDP_USERNAME" \
-            /tmp/vnc-config "/home/$RDP_USERNAME/.vnc/config"
+            'localhost=yes' > "$HOME/.vnc/config"
 
           # 让 VNC 监听 localhost（noVNC/websockify 会转发）
           echo "VNC_DISPLAY=$VNC_DISPLAY" >> "$GITHUB_ENV"
           echo "VNC_PORT=$VNC_PORT" >> "$GITHUB_ENV"
 
       - name: Start VNC server
-        env:
-          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
         run: |
-          # 以目标用户身份启动 VNC，绑定到 localhost
-          sudo -u "$RDP_USERNAME" -H bash -lc "vncserver $VNC_DISPLAY -localhost yes -geometry 1280x720 -depth 24"
+          # 以 root 身份启动 VNC，绑定到 localhost
+          vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24
 
           # 等待 VNC 端口就绪
           for i in $(seq 1 20); do
@@ -110,7 +85,7 @@ jobs:
 
           if ! ss -ltn | grep -q ":$VNC_PORT "; then
             echo "::error::VNC server failed to start on $VNC_DISPLAY"
-            sudo -u "$RDP_USERNAME" -H bash -lc "cat \$HOME/.vnc/*:1.log" || true
+            cat "$HOME/.vnc/*:1.log" || true
             exit 1
           fi
 
@@ -272,16 +247,15 @@ jobs:
 
       - name: Maintain Connection
         env:
-          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           echo ""
           echo "=== noVNC Cloud Desktop ACCESS ==="
           echo "Web URL:  http://$TAILSCALE_IP:$NOVNC_PORT/vnc.html"
           echo "VNC IP:   $TAILSCALE_IP"
           echo "VNC Port: $VNC_PORT  (for VNC client)"
-          echo "Username: $RDP_USERNAME"
-          echo "Password: $RDP_PASSWORD"
+          echo "Username: root"
+          echo "Password: $VNC_PASSWORD"
           echo "================================="
           echo ""
 
@@ -291,7 +265,7 @@ jobs:
             # 检查关键进程
             if ! pgrep -x vncserver >/dev/null 2>&1 && ! pgrep -f "Xvnc" >/dev/null 2>&1; then
               echo "::warning::VNC server process not found, attempting restart..."
-              sudo -u "$RDP_USERNAME" -H bash -lc "vncserver $VNC_DISPLAY -localhost yes -geometry 1280x720 -depth 24" || true
+              vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24 || true
             fi
             if ! pgrep -x websockify >/dev/null 2>&1; then
               echo "::warning::websockify process not found, attempting restart..."
