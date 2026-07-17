@@ -63,6 +63,28 @@ jobs:
           # ─── 卸载不必要的软件 ───
           Write-Host "=== Uninstalling unnecessary software ==="
           
+          # Helper: 强制停止相关服务和进程，避免卸载时文件被占用
+          function Stop-SoftwareProcesses {
+              param(
+                  [string[]]$ServiceNames,
+                  [string[]]$ProcessNames
+              )
+              foreach ($svc in $ServiceNames) {
+                  $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                  if ($existing -and $existing.Status -eq 'Running') {
+                      Write-Host "  Stopping service: $svc"
+                      Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+                  }
+              }
+              foreach ($proc in $ProcessNames) {
+                  $running = Get-Process -Name $proc -ErrorAction SilentlyContinue
+                  if ($running) {
+                      Write-Host "  Killing process: $proc"
+                      Stop-Process -Name $proc -Force -ErrorAction SilentlyContinue
+                  }
+              }
+          }
+
           # Helper: 从注册表查找并静默卸载软件
           function Uninstall-Software($namePattern, $timeoutSeconds = 60) {
               $keys = @(
@@ -119,28 +141,40 @@ jobs:
           }
           
           Write-Host "--- Uninstalling Google Chrome ---"
+          Stop-SoftwareProcesses -ProcessNames @("chrome")
           Uninstall-Software "*Google Chrome*"
           Write-Host "--- Uninstalling Mozilla Firefox ---"
+          Stop-SoftwareProcesses -ProcessNames @("firefox")
           Uninstall-Software "*Mozilla Firefox*"
           Write-Host "--- Uninstalling Unity Hub ---"
+          Stop-SoftwareProcesses -ServiceNames @("UnityHub") -ProcessNames @("Unity Hub", "Unity")
           Uninstall-Software "*Unity Hub*"
           Write-Host "--- Uninstalling R for Windows ---"
+          Stop-SoftwareProcesses -ProcessNames @("R", "Rgui", "Rscript", "RTerm")
           Uninstall-Software "R for Windows*"
           Write-Host "--- Uninstalling Rtools (120s timeout) ---"
+          Stop-SoftwareProcesses -ProcessNames @("gcc", "make", "sh", "rtools")
           Uninstall-Software "Rtools*" -timeoutSeconds 120
           Write-Host "--- Uninstalling AWS CLI ---"
+          Stop-SoftwareProcesses -ProcessNames @("aws")
           Uninstall-Software "AWS Command Line Interface*"
           Write-Host "--- Uninstalling AWS SAM CLI ---"
+          Stop-SoftwareProcesses -ProcessNames @("sam")
           Uninstall-Software "AWS SAM*"
           Write-Host "--- Uninstalling AWS Session Manager Plugin ---"
+          Stop-SoftwareProcesses -ProcessNames @("session-manager-plugin")
           Uninstall-Software "Session Manager Plugin*"
           Write-Host "--- Uninstalling Azure CLI ---"
+          Stop-SoftwareProcesses -ProcessNames @("az")
           Uninstall-Software "Microsoft Azure CLI*"
           Write-Host "--- Uninstalling Azure Cosmos DB Emulator ---"
+          Stop-SoftwareProcesses -ServiceNames @("AzureCosmosDBEmulator") -ProcessNames @("CosmosDB.Emulator")
           Uninstall-Software "Azure Cosmos DB Emulator*"
           Write-Host "--- Uninstalling Azure Service Fabric SDK ---"
+          Stop-SoftwareProcesses -ProcessNames @("Fabric*")
           Uninstall-Software "Microsoft Azure Service Fabric SDK*"
           Write-Host "--- Uninstalling Azure Service Fabric (300s timeout) ---"
+          Stop-SoftwareProcesses -ServiceNames @("FabricHostSvc", "FabricInstallerSvc", "FabricGatewaySvc", "FabricApplicationSvc") -ProcessNames @("FabricHost", "Fabric", "FabricDeployer")
           Uninstall-Software "Microsoft Azure Service Fabric*" -timeoutSeconds 300
           
           Write-Host "Cleanup completed!"
