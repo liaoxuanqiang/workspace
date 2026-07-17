@@ -339,14 +339,46 @@ jobs:
           }
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
 
-          # ── 启动 llama.exe serve 监听 0.0.0.0:8080 ──
-          Write-Host "Starting llama.exe serve on 0.0.0.0:8080..."
+          # ── 下载模型（在启动 serve 之前完成，确保启动时能加载模型） ──
+          Write-Host "Downloading MiniCPM5-1B-F16.gguf from Hugging Face..."
+
+          $modelDir = "$env:LOCALAPPDATA\llama-app\models"
+          $null = New-Item -Path $modelDir -ItemType Directory -Force
+
+          $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
+          $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
+
+          $retries = 0
+          $maxRetries = 3
+          $downloaded = $false
+          while (-not $downloaded -and $retries -lt $maxRetries) {
+              try {
+                  Write-Host "  Attempt $($retries + 1) of $maxRetries..."
+                  $wc = New-Object System.Net.WebClient
+                  $wc.DownloadFile($modelUrl, $modelPath)
+                  $wc.Dispose()
+                  if ((Get-Item $modelPath -ErrorAction SilentlyContinue).Length -gt 0) {
+                      $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+                      Write-Host "  Downloaded! Size: $localMB MB"
+                      $downloaded = $true
+                  }
+              } catch {
+                  Write-Warning "  Download failed: $_"
+                  Remove-Item $modelPath -Force -ErrorAction SilentlyContinue
+              }
+              $retries++
+          }
+          if (-not $downloaded) { Write-Error "Model download failed after $maxRetries attempts"; exit 1 }
+          Write-Host "Model ready at: $modelPath"
+
+          # ── 启动 llama.exe serve 监听 0.0.0.0:8080（带 --model 加载已下载的模型） ──
+          Write-Host "Starting llama.exe serve on 0.0.0.0:8080 with model..."
           $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
           $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
 
-          # 使用 -WindowStyle Hidden 代替 -NoNewWindow 让进程脱离控制台，
+          # 使用 -WindowStyle Hidden 让进程脱离控制台，避免 step 结束 PowerShell 退出时连带杀掉子进程
           # 避免 step 结束 PowerShell 退出时连带杀掉子进程
-          $proc = Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0" -WindowStyle Hidden -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
+          $proc = Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0 --model `"$modelPath`"" -WindowStyle Hidden -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
           Write-Host "  PID: $($proc.Id), log: $llamaLog"
 
           # 等待最多 30 秒让服务启动
@@ -370,81 +402,6 @@ jobs:
           } else {
               Write-Warning "llama.cpp serve still not listening after ${timeout}s, but process is alive."
           }
-      - name: Download MiniCPM5-1B GGUF Model
-        run: |
-          Write-Host "Downloading MiniCPM5-1B-F16.gguf from Hugging Face..."
-
-          $modelDir = "$env:LOCALAPPDATA\llama-app\models"
-          $null = New-Item -Path $modelDir -ItemType Directory -Force
-
-          $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
-          $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
-
-          # 使用 Invoke-WebRequest 下载，支持断点续传的大文件下载
-          $retries = 0
-          $maxRetries = 3
-          $downloaded = $false
-
-          while (-not $downloaded -and $retries -lt $maxRetries) {
-              try {
-                  Write-Host "  Attempt $($retries + 1) of $maxRetries..."
-                  # 先尝试获取文件大小
-                  $response = Invoke-WebRequest -Uri $modelUrl -Method Head -UseBasicParsing
-                  $totalSize = $response.Headers["Content-Length"] | Select-Object -First 1
-                  if ($totalSize) {
-                      $totalMB = [math]::Round([int64]$totalSize / 1MB, 2)
-                      Write-Host "  Remote file size: $totalMB MB"
-                  }
-
-                  # 使用 WebClient 下载（支持大文件，避免内存溢出）
-                  $wc = New-Object System.Net.WebClient
-                  $wc.DownloadFile($modelUrl, $modelPath)
-                  $wc.Dispose()
-
-                  # 验证文件
-                  if (Test-Path $modelPath) {
-                      $localSize = (Get-Item $modelPath).Length
-                      $localMB = [math]::Round($localSize / 1MB, 2)
-                      Write-Host "  Downloaded successfully! Local size: $localMB MB"
-                      
-                      # 如果服务器返回了大小，校验一下
-                      if ($totalSize -and $localSize -eq [int64]$totalSize) {
-                          Write-Host "  Size verification passed."
-                          $downloaded = $true
-                      } elseif ($totalSize) {
-                          Write-Warning "  Size mismatch: expected $totalSize, got $localSize. Retrying..."
-                          Remove-Item $modelPath -Force -ErrorAction SilentlyContinue
-                      } else {
-                          Write-Host "  Could not verify size (no Content-Length header), assuming success."
-                          $downloaded = $true
-                      }
-                  } else {
-                      Write-Warning "  Downloaded file not found at expected path."
-                  }
-              } catch {
-                  Write-Warning "  Download failed: $_"
-              }
-              $retries++
-          }
-
-          if (-not $downloaded) {
-              Write-Error "Failed to download MiniCPM5-1B-F16.gguf after $maxRetries attempts"
-              exit 1
-          }
-
-          Write-Host "Model downloaded to: $modelPath"
-          
-          # 验证模型文件存在即可（跳过 llama --model 加载，省掉 2GB GGUF 文件读取时间）
-          if (Test-Path $modelPath) {
-              $localSize = (Get-Item $modelPath).Length
-              $localMB = [math]::Round($localSize / 1MB, 2)
-              Write-Host "Model file exists: $localMB MB — verification passed."
-          } else {
-              Write-Error "Model file not found at $modelPath"
-              exit 1
-          }
-
-          Write-Host "MiniCPM5-1B-F16.gguf download and verification completed!"
       - name: Maintain Connection
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
