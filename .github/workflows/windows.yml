@@ -173,9 +173,13 @@ jobs:
           Write-Host "--- Uninstalling Azure Service Fabric SDK ---"
           Stop-SoftwareProcesses -ProcessNames @("Fabric*")
           Uninstall-Software "Microsoft Azure Service Fabric SDK*"
-          Write-Host "--- Uninstalling Azure Service Fabric (300s timeout) ---"
-          Stop-SoftwareProcesses -ServiceNames @("FabricHostSvc", "FabricInstallerSvc", "FabricGatewaySvc", "FabricApplicationSvc") -ProcessNames @("FabricHost", "Fabric", "FabricDeployer")
-          Uninstall-Software "Microsoft Azure Service Fabric*" -timeoutSeconds 300
+          Write-Host "--- Uninstalling Azure Service Fabric (非阻塞后台卸载) ---"
+          # Azure Service Fabric 的 CleanFabric.ps1 会派生 FabricDeployer.exe 子进程，
+          # 父进程退出后 FabricDeployer 成为孤儿导致 GHA 取消整个 job。
+          # 这里用 Start-Process 启动后不等待，放后台执行避免阻塞后续步骤。
+          $fabricUninstallCmd = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-File \"C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\CleanFabric.ps1\"' -NoNewWindow -Wait"
+          Start-Process -FilePath "powershell.exe" -ArgumentList "-Command", $fabricUninstallCmd -NoNewWindow -WindowStyle Hidden
+          Write-Host "  Azure Service Fabric 卸载已在后台启动，后续步骤继续执行。"
           
           Write-Host "Cleanup completed!"
       - name: Install Tailscale
@@ -540,32 +544,49 @@ jobs:
           }
           Write-Host "llama.cpp installed successfully. Path: $llamaPath"
           
-          # 启动 llama.exe serve 作为后台任务（监听 8080 端口）
-          Write-Host "Starting llama.exe serve on port 8080..."
-          $jobScript = {
-              param($exePath)
-              & $exePath serve --port 8080 --host 0.0.0.0
+          # 将 llama 目录写入系统 PATH（RDP 登录后也能直接用 llama 命令）
+          $llamaDir = Split-Path $llamaPath -Parent
+          $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if ($currentPath -notlike "*$llamaDir*") {
+              [Environment]::SetEnvironmentVariable('Path', "$currentPath;$llamaDir", 'Machine')
+              Write-Host "Added $llamaDir to system PATH."
           }
-          Start-Job -Name "llama-serve" -ScriptBlock $jobScript -ArgumentList $llamaPath
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
           
-          # 等待几秒确认服务启动
+          # 启动 llama.exe serve 作为独立进程（监听 0.0.0.0:8080，可通过 Tailscale 访问）
+          Write-Host "Starting llama.exe serve on 0.0.0.0:8080..."
+          $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
+          $startArgs = "serve --port 8080 --host 0.0.0.0"
+          if (Test-Path "$llamaDir\llama-server.exe") {
+              $serverExe = "$llamaDir\llama-server.exe"
+          } else {
+              $serverExe = $llamaPath
+          }
+          # 用 Start-Process 启动独立进程，继承到后续 step
+          $proc = Start-Process -FilePath $serverExe -ArgumentList $startArgs -NoNewWindow -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
+          Write-Host "  PID: $($proc.Id), log: $llamaLog"
+          
+          # 等 5 秒确认服务启动
           Start-Sleep -Seconds 5
           
           # 检查服务是否在监听
           $netstatResult = netstat -an | Select-String ":8080.*LISTENING"
           if ($netstatResult) {
-              Write-Host "llama.exe serve is listening on port 8080."
+              Write-Host "llama.cpp serve is listening on 0.0.0.0:8080."
           } else {
-              Write-Warning "llama.exe serve may not be listening yet. Checking job status..."
-              $job = Get-Job -Name "llama-serve" -ErrorAction SilentlyContinue
-              if ($job.State -eq "Failed") {
-                  $errorMsg = Receive-Job -Job $job
-                  Write-Error "llama.exe serve failed: $errorMsg"
+              Write-Warning "llama.cpp serve may not be listening yet. Checking process..."
+              if ($proc.HasExited) {
+                  $exitCode = $proc.ExitCode
+                  $logContent = Get-Content $llamaLog -Tail 10 -ErrorAction SilentlyContinue
+                  Write-Error "llama.cpp serve exited with code $exitCode. Last log lines: $logContent"
                   exit 1
+              } else {
+                  Write-Host "Process is still running (PID $($proc.Id)), waiting..."
+                  Start-Sleep -Seconds 10
               }
           }
           
-          Write-Host "llama.cpp server started on port 8080."
+          Write-Host "llama.cpp server started on 0.0.0.0:8080."
       - name: Download MiniCPM5-1B GGUF Model
         run: |
           Write-Host "Downloading MiniCPM5-1B-F16.gguf from Hugging Face..."
