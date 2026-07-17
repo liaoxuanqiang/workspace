@@ -185,7 +185,7 @@ jobs:
               $nonMsiItems = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
                   Where-Object { $_.DisplayName -like $namePattern -and $_.PSChildName -notmatch '^\{' -and $_.UninstallString }
               foreach ($item in $nonMsiItems) {
-                  Write-Host "  Found: $($item.DisplayName) (Non-MSI)" — uninstalling via UninstallString..."
+                  Write-Host "  Found: $($item.DisplayName) (Non-MSI) — uninstalling via UninstallString..."
                   $ustr = $item.UninstallString -replace '^"(.+?)"\s*(.*)','$1 $2'
                   Write-Host "  Running: $ustr"
                   $p = Start-Process cmd.exe -ArgumentList "/c `"$ustr /SILENT /SUPPRESSMSGBOXES`"" -NoNewWindow -PassThru
