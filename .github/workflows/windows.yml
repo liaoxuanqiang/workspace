@@ -108,16 +108,36 @@ jobs:
                       } else {
                           @($uninstallStr, '')
                       }
+                      
+                      # ── 针对 Firefox: helper.exe 必须传 /S 才能静默卸载 ──
+                      if ($parts[0] -match '\\Mozilla Firefox\\uninstall\\helper\.exe$') {
+                          Write-Host "  Detected Firefox helper.exe — appending /S for silent mode."
+                          $parts[1] = '/S'
+                      }
+                      # ── 针对 Chrome: setup.exe 必须传 --uninstall --force-uninstall ──
+                      elseif ($parts[0] -match '\\Google\\Chrome\\Application\\.+\\Installer\\setup\.exe$') {
+                          Write-Host "  Detected Chrome setup.exe — using --uninstall --force-uninstall."
+                          $parts[1] = '--uninstall --force-uninstall'
+                      }
+                      
                       Write-Host "  Running: $($parts[0]) $($parts[1])"
-                      Start-Process -Wait -FilePath $parts[0] -ArgumentList $parts[1] -NoNewWindow
+                      # 加超时避免卡死，60 秒后强制终止
+                      $proc = Start-Process -FilePath $parts[0] -ArgumentList $parts[1] -NoNewWindow -PassThru
+                      if (-not $proc.WaitForExit(60000)) {
+                          Write-Warning "  Uninstall timed out after 60s, killing process."
+                          $proc.Kill()
+                      }
                   }
                   Write-Host "  Uninstalled."
               }
               if (-not $items) { Write-Host "  Not found, skipping." }
           }
           
+          Write-Host "--- Uninstalling Google Chrome ---"
           Uninstall-Software "*Google Chrome*"
+          Write-Host "--- Uninstalling Mozilla Firefox ---"
           Uninstall-Software "*Mozilla Firefox*"
+          Write-Host "--- Uninstalling Unity Hub ---"
           Uninstall-Software "*Unity Hub*"
           
           Write-Host "Cleanup completed!"
