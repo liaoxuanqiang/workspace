@@ -87,6 +87,10 @@ jobs:
           # 杀掉所有需要停止的进程
           Stop-SoftwareProcesses -ServiceNames @("UnityHub", "AzureCosmosDBEmulator", "FabricHostSvc", "FabricInstallerSvc", "FabricGatewaySvc", "FabricApplicationSvc") -ProcessNames @("chrome", "firefox", "Unity Hub", "Unity", "R", "Rgui", "Rscript", "RTerm", "gcc", "make", "sh", "rtools", "aws", "sam", "az", "CosmosDB.Emulator", "FabricHost", "Fabric", "FabricDeployer", "session-manager-plugin")
 
+          # 先杀掉所有残留的 msiexec 进程，释放 MSI 锁
+          Get-Process -Name "msiexec" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
           # ── Phase 1: 非 MSI 软件（可真正并行，每个设 60s 超时防挂起） ──
           Write-Host "--- Phase 1: Non-MSI (parallel) ---"
 
@@ -145,20 +149,50 @@ jobs:
                   'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
               )
               $items = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
-                  Where-Object { $_.DisplayName -like $namePattern }
+                  Where-Object { $_.DisplayName -like $namePattern -and $_.PSChildName -match '^\{' }
               foreach ($item in $items) {
-                  Write-Host "  Found: $($item.DisplayName) — uninstalling..."
+                  Write-Host "  Found: $($item.DisplayName) (MSI: $($item.PSChildName)) — uninstalling..."
                   $args = "/x $($item.PSChildName) /quiet /norestart"
-                  Write-Host "  Running: msiexec $args"
-                  $p = Start-Process msiexec.exe -ArgumentList $args -NoNewWindow -PassThru
-                  if (-not $p.WaitForExit($timeoutSeconds * 1000)) {
-                      Write-Warning "  Timed out after ${timeoutSeconds}s, killing."
-                      $p.Kill()
-                  } else {
-                      Write-Host "  $($item.DisplayName) uninstalled (exit code: $($p.ExitCode))."
+                  $succeeded = $false
+                  for ($attempt = 1; $attempt -le 3; $attempt++) {
+                      Write-Host "  Attempt $attempt: msiexec $args"
+                      $p = Start-Process msiexec.exe -ArgumentList $args -NoNewWindow -PassThru
+                      $waited = $p.WaitForExit($timeoutSeconds * 1000)
+                      if ($waited) {
+                          if ($p.ExitCode -eq 0) {
+                              Write-Host "  $($item.DisplayName) uninstalled (exit code: 0)."
+                              $succeeded = $true
+                              break
+                          } elseif ($p.ExitCode -eq 1618) {
+                              Write-Warning "  Exit code 1618 (another install in progress). Waiting 10s, retrying..."
+                              Start-Sleep -Seconds 10
+                          } else {
+                              Write-Warning "  Exit code $($p.ExitCode). Retrying..."
+                              Start-Sleep -Seconds 5
+                          }
+                      } else {
+                          Write-Warning "  Timed out after ${timeoutSeconds}s, killing process."
+                          $p.Kill()
+                          # 重置 MSI Installer 状态
+                          Start-Sleep -Seconds 2
+                      }
+                  }
+                  if (-not $succeeded) {
+                      Write-Warning "  $($item.DisplayName) 卸载失败（已重试 3 次）。"
                   }
               }
-              if (-not $items) { Write-Host "  $namePattern not found, skipping." }
+              # 处理非 MSI 安装（InnoSetup 等），通过 UninstallString 直接运行
+              $nonMsiItems = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+                  Where-Object { $_.DisplayName -like $namePattern -and $_.PSChildName -notmatch '^\{' -and $_.UninstallString }
+              foreach ($item in $nonMsiItems) {
+                  Write-Host "  Found: $($item.DisplayName) (Non-MSI)" — uninstalling via UninstallString..."
+                  $ustr = $item.UninstallString -replace '^"(.+?)"\s*(.*)','$1 $2'
+                  Write-Host "  Running: $ustr"
+                  $p = Start-Process cmd.exe -ArgumentList "/c `"$ustr /SILENT /SUPPRESSMSGBOXES`"" -NoNewWindow -PassThru
+                  if (-not $p.WaitForExit(60000)) { Write-Warning "  Timed out, killed."; $p.Kill() }
+                  else { Write-Host "  $($item.DisplayName) uninstalled (exit: $($p.ExitCode))." }
+              }
+              if (-not $items -and -not $nonMsiItems) { Write-Host "  $namePattern not found, skipping." }
           }
 
           Uninstall-Msi -namePattern 'R for Windows*' -timeoutSeconds 120
@@ -339,49 +373,90 @@ jobs:
           }
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
 
-          # ── 下载模型（在启动 serve 之前完成，确保启动时能加载模型） ──
-          Write-Host "Downloading MiniCPM5-1B-F16.gguf from Hugging Face..."
+          # ── 使用 llama download 下载模型到共享路径（替换旧版 WebClient 下载） ──
+          Write-Host "Downloading MiniCPM5-1B-F16.gguf via llama download..."
 
-          $modelDir = "$env:LOCALAPPDATA\llama-app\models"
+          $modelDir = "C:\ProgramData\llama-models"
           $null = New-Item -Path $modelDir -ItemType Directory -Force
+          # 确保 Everyone 可读
+          icacls $modelDir /grant "Everyone:(OI)(CI)R" /T /Q 2>$null
 
-          $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
           $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
 
-          $retries = 0
-          $maxRetries = 3
-          $downloaded = $false
-          while (-not $downloaded -and $retries -lt $maxRetries) {
-              try {
-                  Write-Host "  Attempt $($retries + 1) of $maxRetries..."
-                  $wc = New-Object System.Net.WebClient
-                  $wc.DownloadFile($modelUrl, $modelPath)
-                  $wc.Dispose()
-                  if ((Get-Item $modelPath -ErrorAction SilentlyContinue).Length -gt 0) {
-                      $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
-                      Write-Host "  Downloaded! Size: $localMB MB"
-                      $downloaded = $true
-                  }
-              } catch {
-                  Write-Warning "  Download failed: $_"
-                  Remove-Item $modelPath -Force -ErrorAction SilentlyContinue
-              }
-              $retries++
+          # 先启动 serve 服务（暂不加载模型），然后并行下载
+          # 步骤 1: 注册 Windows 服务（不含 --model，先让服务跑起来）
+          Write-Host "Step 1: Registering llama service (without model)..."
+
+          $llamaLog = "$env:ProgramData\llama-models\llama-server.log"
+          $null = New-Item -Path "$env:ProgramData\llama-models" -ItemType Directory -Force
+
+          $existing = Get-Service -Name "llama" -ErrorAction SilentlyContinue
+          if ($existing) {
+              sc.exe stop llama 2>$null
+              sc.exe delete llama 2>$null
+              Start-Sleep -Seconds 2
           }
-          if (-not $downloaded) { Write-Error "Model download failed after $maxRetries attempts"; exit 1 }
+
+          # 第一次注册：不带 --model，仅启动 HTTP 端口
+          $binaryPathNoModel = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0"
+          New-Service -Name "llama" `
+              -BinaryPathName $binaryPathNoModel `
+              -StartupType Automatic `
+              -DisplayName "llama.cpp Server" `
+              -Description "llama.cpp inference server"
+          sc.exe failure llama reset= 86400 actions= restart/5000/restart/10000/restart/30000
+          sc.exe start llama
+          Write-Host "  llama service started (no model)."
+
+          # 步骤 2: 使用 llama download 命令下载模型
+          Write-Host "Step 2: Downloading model with 'llama download'..."
+          & $llamaPath download --hf-repo openbmb/MiniCPM5-1B-GGUF --hf-file MiniCPM5-1B-F16.gguf --output-dir "$modelDir"
+          $downloadExit = $LASTEXITCODE
+
+          if ($downloadExit -ne 0 -or -not (Test-Path $modelPath) -or (Get-Item $modelPath).Length -eq 0) {
+              Write-Warning "  llama download failed (exit: $downloadExit). Model file: $(if(Test-Path $modelPath){'exists but may be invalid'}else{'not found'})"
+              # 回退：用 WebClient 下载
+              Write-Host "  Falling back: downloading with WebClient..."
+              $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
+              $retries = 0; $maxRetries = 3; $downloaded = $false
+              while (-not $downloaded -and $retries -lt $maxRetries) {
+                  try {
+                      Write-Host "    Attempt $($retries + 1) of $maxRetries..."
+                      $wc = New-Object System.Net.WebClient
+                      $wc.DownloadFile($modelUrl, $modelPath)
+                      $wc.Dispose()
+                      if ((Get-Item $modelPath -ErrorAction SilentlyContinue).Length -gt 0) {
+                          $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+                          Write-Host "    Downloaded! Size: $localMB MB"; $downloaded = $true
+                      }
+                  } catch { Write-Warning "    Download failed: $_"; Remove-Item $modelPath -Force -ErrorAction SilentlyContinue }
+                  $retries++
+              }
+              if (-not $downloaded) { Write-Error "Model download failed after fallback."; exit 1 }
+          } else {
+              $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+              Write-Host "  Model downloaded via llama download! Size: $localMB MB"
+          }
           Write-Host "Model ready at: $modelPath"
 
-          # ── 启动 llama.exe serve 监听 0.0.0.0:8080（带 --model 加载已下载的模型） ──
-          Write-Host "Starting llama.exe serve on 0.0.0.0:8080 with model..."
-          $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
-          $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
+          # 步骤 3: 停止服务，更新二进制路径以包含 --model，重新启动
+          Write-Host "Step 3: Updating service to load model..."
+          sc.exe stop llama
+          Start-Sleep -Seconds 3
+          sc.exe delete llama
+          Start-Sleep -Seconds 2
 
-          # 使用 -WindowStyle Hidden 让进程脱离控制台，避免 step 结束 PowerShell 退出时连带杀掉子进程
-          # 避免 step 结束 PowerShell 退出时连带杀掉子进程
-          $proc = Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0 --model `"$modelPath`"" -WindowStyle Hidden -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
-          Write-Host "  PID: $($proc.Id), log: $llamaLog"
+          $binaryPathWithModel = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0 --model `"$modelPath`""
+          New-Service -Name "llama" `
+              -BinaryPathName $binaryPathWithModel `
+              -StartupType Automatic `
+              -DisplayName "llama.cpp Server" `
+              -Description "llama.cpp inference server with MiniCPM5-1B model"
+          sc.exe failure llama reset= 86400 actions= restart/5000/restart/10000/restart/30000
+          sc.exe start llama
 
           # 等待最多 30 秒让服务启动
+          Write-Host "Waiting for llama service to start..."
           $timeout = 30
           $elapsed = 0
           do {
@@ -389,18 +464,20 @@ jobs:
               $elapsed += 3
               $listening = netstat -an | Select-String ":8080.*LISTENING"
               if ($listening) { break }
-              if ($proc.HasExited) {
-                  $logContent = Get-Content $llamaLog -Tail 10 -ErrorAction SilentlyContinue
-                  Write-Error "llama.cpp serve exited early (code $($proc.ExitCode)). Last log: $logContent"
+              $svc = Get-Service -Name "llama" -ErrorAction SilentlyContinue
+              if ($svc -and $svc.Status -eq 'Stopped') {
+                  Write-Error "llama service stopped unexpectedly."
+                  $svcLog = "$env:ProgramData\llama-models\llama-server.log"
+                  if (Test-Path $svcLog) { Get-Content $svcLog -Tail 20 -ErrorAction SilentlyContinue }
                   exit 1
               }
               Write-Host "  Waiting for llama serve... ${elapsed}s"
           } while ($elapsed -lt $timeout)
 
           if ($listening) {
-              Write-Host "llama.cpp serve is listening on 0.0.0.0:8080."
+              Write-Host "llama.cpp serve is listening on 0.0.0.0:8080 (Windows Service, with model)."
           } else {
-              Write-Warning "llama.cpp serve still not listening after ${timeout}s, but process is alive."
+              Write-Warning "llama.cpp serve still not listening after ${timeout}s, but service is running."
           }
       - name: Maintain Connection
         env:
@@ -417,23 +494,38 @@ jobs:
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "===================================`n"
 
-          # 检查 llama.cpp 服务是否还在运行
-          $llamaProc = Get-Process -Name "llama" -ErrorAction SilentlyContinue
-          if (-not $llamaProc) { $llamaProc = Get-Process -Name "llama-server" -ErrorAction SilentlyContinue }
-          if ($llamaProc) {
-              Write-Host "llama.cpp serve 进程正在运行 (PID: $($llamaProc.Id))，无需重复启动。"
+          # 检查 llama 服务是否正在运行（Windows Service，跨会话）
+          $llamaSvc = Get-Service -Name "llama" -ErrorAction SilentlyContinue
+          if ($llamaSvc -and $llamaSvc.Status -eq 'Running') {
+              Write-Host "llama 服务正在运行 (Windows Service)。"
           } else {
-              Write-Warning "llama.cpp serve 进程未运行，尝试重启..."
-              $llamaPath = & where.exe llama.exe 2>$null
-              if (-not $llamaPath) {
-                  $llamaPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama.exe"
+              Write-Warning "llama 服务未运行，尝试重新启动服务..."
+              if ($llamaSvc) {
+                  sc.exe start llama 2>$null
+              } else {
+                  # 服务不存在，尝试注册并启动
+                  $llamaPath = & where.exe llama.exe 2>$null
+                  if (-not $llamaPath) {
+                      $llamaPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama.exe"
+                  }
+                  if (Test-Path $llamaPath) {
+                      $modelPath = "C:\ProgramData\llama-models\MiniCPM5-1B-F16.gguf"
+                      $binaryPath = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0 --model `"$modelPath`""
+                      New-Service -Name "llama" -BinaryPathName $binaryPath -StartupType Automatic -DisplayName "llama.cpp Server"
+                      sc.exe failure llama reset= 86400 actions= restart/5000/restart/10000/restart/30000
+                      sc.exe start llama
+                  }
               }
-              if (Test-Path $llamaPath) {
-                  $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
-                  $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
-                  Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0" -WindowStyle Hidden -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
-                  Write-Host "  Restarted llama.cpp serve on 0.0.0.0:8080."
-              }
+              Write-Host "  llama 服务已触发启动。"
+          }
+
+          # 验证端口可访问
+          Write-Host "Verifying llama service on 127.0.0.1:8080..."
+          try {
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:8080" -TimeoutSec 5 -UseBasicParsing
+              Write-Host "  HTTP 响应: $($r.StatusCode)"
+          } catch {
+              Write-Warning "  127.0.0.1:8080 暂时不可用（可能仍在加载模型）：$_"
           }
 
           # 保持 runner 持续运行
