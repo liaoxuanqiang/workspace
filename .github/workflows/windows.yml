@@ -174,12 +174,13 @@ jobs:
           Stop-SoftwareProcesses -ProcessNames @("Fabric*")
           Uninstall-Software "Microsoft Azure Service Fabric SDK*"
           Write-Host "--- Uninstalling Azure Service Fabric (非阻塞后台卸载) ---"
-          # Azure Service Fabric 的 CleanFabric.ps1 会派生 FabricDeployer.exe 子进程，
-          # 父进程退出后 FabricDeployer 成为孤儿导致 GHA 取消整个 job。
-          # 这里用 Start-Process 启动后不等待，放后台执行避免阻塞后续步骤。
-          $fabricUninstallCmd = "Start-Process -FilePath 'powershell.exe' -ArgumentList '-File \"C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\CleanFabric.ps1\"' -NoNewWindow -Wait"
-          Start-Process -FilePath "powershell.exe" -ArgumentList "-Command", $fabricUninstallCmd -NoNewWindow -WindowStyle Hidden
-          Write-Host "  Azure Service Fabric 卸载已在后台启动，后续步骤继续执行。"
+          $cleanFabricPath = "C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\CleanFabric.ps1"
+          if (Test-Path $cleanFabricPath) {
+              Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$cleanFabricPath`"" -WindowStyle Hidden
+              Write-Host "  Azure Service Fabric 卸载已在后台启动，后续步骤继续执行。"
+          } else {
+              Write-Host "  CleanFabric.ps1 not found, skipping."
+          }
           
           Write-Host "Cleanup completed!"
       - name: Install Tailscale
