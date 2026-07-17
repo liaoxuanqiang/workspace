@@ -155,7 +155,7 @@ jobs:
                   $args = "/x $($item.PSChildName) /quiet /norestart"
                   $succeeded = $false
                   for ($attempt = 1; $attempt -le 3; $attempt++) {
-                      Write-Host "  Attempt $attempt: msiexec $args"
+                      Write-Host "  Attempt $($attempt): msiexec $args"
                       $p = Start-Process msiexec.exe -ArgumentList $args -NoNewWindow -PassThru
                       $waited = $p.WaitForExit($timeoutSeconds * 1000)
                       if ($waited) {
