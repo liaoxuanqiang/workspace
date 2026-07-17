@@ -439,8 +439,8 @@ jobs:
         run: |
           Write-Host "Installing llama.cpp via winget..."
 
-          # ── winget 安装 llama.cpp ──
-          $proc = Start-Process -FilePath "winget" -ArgumentList "install", "llama.cpp", "--accept-package-agreements", "--silent", "--disable-interactivity" -NoNewWindow -Wait -PassThru
+          # ── winget 安装 llama.cpp（仅 winget 源，避免 msstore 协议确认） ──
+          $proc = Start-Process -FilePath "winget" -ArgumentList "install", "llama.cpp", "--source", "winget", "--accept-package-agreements", "--silent", "--disable-interactivity" -NoNewWindow -Wait -PassThru
           if ($proc.ExitCode -ne 0) {
               Write-Error "winget install llama.cpp failed with exit code $($proc.ExitCode)"
               exit 1
