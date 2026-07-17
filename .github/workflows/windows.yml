@@ -245,13 +245,13 @@ jobs:
           Write-Host "Tailscale installed."
 
           # ════════════════════════════════════════════
-          # 2. 认证 Tailscale + 并行启动模型下载
+          # 2. 认证 Tailscale
           # ════════════════════════════════════════════
           if ("$env:TAILSCALE_AUTH_KEY" -eq "") { Write-Error "TAILSCALE_AUTH_KEY missing"; exit 1 }
           Write-Host "Authenticating Tailscale..."
           & "$tsPath\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=windows
           
-          # 等待 Tailscale 分配 IP（同时启动模型下载）
+          # 等待 Tailscale 分配 IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -378,7 +378,6 @@ jobs:
 
           # ════════════════════════════════════════════
           # 3. 使用 llama download 下载 MiniCPM5 模型
-          #    优先用内置工具，失败则回退 WebClient
           # ════════════════════════════════════════════
           Write-Host "Downloading MiniCPM5-1B-F16.gguf via llama download..."
 
@@ -389,26 +388,9 @@ jobs:
           $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
 
           & $llamaPath download --hf-repo openbmb/MiniCPM5-1B-GGUF --hf-file MiniCPM5-1B-F16.gguf --output-dir "$modelDir"
-          $downloadExit = $LASTEXITCODE
-
-          if ($downloadExit -ne 0 -or -not (Test-Path $modelPath) -or (Get-Item $modelPath).Length -eq 0) {
-              Write-Warning "  llama download failed (exit: $downloadExit), falling back to WebClient..."
-              $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
-              $retries = 0; $maxRetries = 3; $downloaded = $false
-              while (-not $downloaded -and $retries -lt $maxRetries) {
-                  try {
-                      Write-Host "    Attempt $($retries + 1) of $maxRetries..."
-                      $wc = New-Object System.Net.WebClient
-                      $wc.DownloadFile($modelUrl, $modelPath)
-                      $wc.Dispose()
-                      if ((Get-Item $modelPath -ErrorAction SilentlyContinue).Length -gt 0) {
-                          $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
-                          Write-Host "    Downloaded! Size: $localMB MB"; $downloaded = $true
-                      }
-                  } catch { Write-Warning "    Download failed: $_"; Remove-Item $modelPath -Force -ErrorAction SilentlyContinue }
-                  $retries++
-              }
-              if (-not $downloaded) { Write-Error "Model download failed after fallback."; exit 1 }
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $modelPath) -or (Get-Item $modelPath).Length -eq 0) {
+              Write-Error "llama download failed — check network or Hugging Face availability"
+              exit 1
           }
           $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
           Write-Host "Model ready at: $modelPath ($localMB MB)"
