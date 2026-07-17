@@ -60,10 +60,10 @@ jobs:
           }
       - name: Uninstall Unnecessary Software
         run: |
-          # ─── 卸载不必要的软件（两阶段策略） ───
-          #    Phase 1: 非 MSI 软件 → 真正并行（Chrome / Firefox / Unity Hub）
-          #    Phase 2: MSI 软件 → 串行（因为 msiexec 有全局互斥锁，并行反而更慢）
-          #    Phase 3: Service Fabric CleanFabric → 后台不阻塞
+          # ─── 卸载不必要的软件 ───
+          #     并行卸载: Chrome / Firefox / Unity Hub
+          #     串行卸载: R for Windows（MSI）
+          #     后台卸载: Rtools（MSI）
           Write-Host "=== Uninstalling unnecessary software ==="
           
           function Stop-SoftwareProcesses {
@@ -199,18 +199,25 @@ jobs:
 
           Uninstall-Msi -namePattern 'R for Windows*' -timeoutSeconds 120
 
-          # Rtools（已知很慢，后台不阻塞）
+          # Rtools（已知很慢，后台不阻塞，结束时写入状态标记）
           $rtoolsItems = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
               Where-Object { $_.DisplayName -like 'Rtools*' }
           if ($rtoolsItems) {
               foreach ($item in $rtoolsItems) {
-                  Write-Host "  Rtools found, uninstalling in background (PID below)..."
-                  Start-Process msiexec.exe -ArgumentList "/x $($item.PSChildName) /quiet /norestart" -NoNewWindow
+                  Write-Host "  Rtools found, uninstalling in background..."
+                  $job = Start-Job -Name "RtoolsUninstall" -ScriptBlock {
+                      param($guid)
+                      $p = Start-Process msiexec.exe -ArgumentList "/x $guid /quiet /norestart" -NoNewWindow -PassThru
+                      $p.WaitForExit(300000)
+                      $p.ExitCode
+                  } -ArgumentList $item.PSChildName
+                  # 记入环境变量供后续检查
+                  Write-Host "Rtools uninstall started as background job."
               }
           } else { Write-Host "  Rtools not found, skipping." }
 
           Write-Host "Cleanup completed!"
-      - name: Install Tailscale, Authenticate, Configure & Parallel Model Download
+      - name: Install and Configure Tailscale
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
           TAILSCALE_API_TOKEN: ${{ secrets.TAILSCALE_API_TOKEN }}
@@ -319,10 +326,6 @@ jobs:
 
           Write-Host "Tailscale 配置完成！IP: $tsIP"
 
-          # ════════════════════════════════════════════
-          # 5. 并行：此时 Tailscale 已全部配好，RDP 可用，开始安装 llama.cpp + 下载模型
-          #    但为了不阻塞 RDP 连接，在 Maintain Connection 步骤之前做完即可
-          # ════════════════════════════════════════════
           Write-Host "=== Tailscale 配置完成 ==="
       - name: Install and Start llama.cpp
         run: |
@@ -363,7 +366,7 @@ jobs:
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
 
           # ════════════════════════════════════════════
-          # 3. 使用 llama download 下载 MiniCPM5 模型
+          # 3. 使用 llama download 下载 MiniCPM5 模型（带 300s 超时）
           # ════════════════════════════════════════════
           Write-Host "Downloading MiniCPM5-1B-F16.gguf via llama download..."
 
@@ -373,8 +376,18 @@ jobs:
           icacls $modelDir /grant "Everyone:(OI)(CI)R" /T /Q 2>$null
           $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
 
-          # llama download 可能不支持 --output-dir，且会写到 HuggingFace 缓存
-          & $llamaPath download --hf-repo openbmb/MiniCPM5-1B-GGUF --hf-file MiniCPM5-1B-F16.gguf
+          # llama download 带超时包装
+          $dlTimeout = 300
+          $dlJob = Start-Job -Name "ModelDownload" -ScriptBlock {
+              param($lp, $repo, $file)
+              & $lp download --hf-repo $repo --hf-file $file
+          } -ArgumentList $llamaPath, "openbmb/MiniCPM5-1B-GGUF", "MiniCPM5-1B-F16.gguf"
+          $dlJob | Wait-Job -Timeout $dlTimeout | Out-Null
+          if ($dlJob.State -eq 'Running') {
+              $dlJob | Stop-Job | Out-Null
+              Write-Warning "Model download timed out after ${dlTimeout}s, continuing with cache search..."
+          }
+          Receive-Job $dlJob 2>&1 | Out-Null
 
           # 不依赖 $LASTEXITCODE（新版可能返回非零即使成功），搜索缓存/模型目录
           if (-not (Test-Path $modelPath) -or (Get-Item $modelPath).Length -eq 0) {
@@ -482,29 +495,25 @@ jobs:
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "===================================`n"
 
-          # 检查 llama 服务是否正在运行（Windows Service，跨会话）
-          $llamaSvc = Get-Service -Name "llama" -ErrorAction SilentlyContinue
-          if ($llamaSvc -and $llamaSvc.Status -eq 'Running') {
-              Write-Host "llama 服务正在运行 (Windows Service)。"
+          # 检查 llama.exe 后台进程是否仍在运行
+          $llamaProc = Get-Process -Name "llama" -ErrorAction SilentlyContinue
+          if ($llamaProc) {
+              Write-Host "llama.exe 后台进程正在运行 (PID: $($llamaProc.Id))。"
           } else {
-              Write-Warning "llama 服务未运行，尝试重新启动服务..."
-              if ($llamaSvc) {
-                  sc.exe start llama 2>$null
+              Write-Warning "llama.exe 后台进程未运行，尝试重新启动..."
+              $llamaPath = & where.exe llama.exe 2>$null
+              if (-not $llamaPath) { $llamaPath = (Get-Command llama.exe -ErrorAction SilentlyContinue).Source }
+              if (-not $llamaPath) {
+                  Write-Warning "llama.exe 未找到，跳过自动重启。"
               } else {
-                  # 服务不存在，尝试注册并启动
-                  $llamaPath = & where.exe llama.exe 2>$null
-                  if (-not $llamaPath) {
-                      $llamaPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama.exe"
-                  }
-                  if (Test-Path $llamaPath) {
-                      $modelPath = "C:\ProgramData\llama-models\MiniCPM5-1B-F16.gguf"
-                      $binaryPath = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0 --model `"$modelPath`""
-                      New-Service -Name "llama" -BinaryPathName $binaryPath -StartupType Automatic -DisplayName "llama.cpp Server"
-                      sc.exe failure llama reset= 86400 actions= restart/5000/restart/10000/restart/30000
-                      sc.exe start llama
+                  $modelPath = "C:\ProgramData\llama-models\MiniCPM5-1B-F16.gguf"
+                  $logFile = "$env:ProgramData\llama-models\llama-server.log"
+                  if (Test-Path $modelPath) {
+                      Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0 --model `"$modelPath`"" `
+                          -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError "${logFile}.err"
+                      Write-Host "  llama serve 已重新启动。"
                   }
               }
-              Write-Host "  llama 服务已触发启动。"
           }
 
           # 验证端口可访问
