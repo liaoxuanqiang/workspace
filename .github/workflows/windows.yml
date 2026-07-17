@@ -58,26 +58,10 @@ jobs:
               Write-Error "User creation failed"
               exit 1
           }
-      - name: Cleanup WinSxS and Uninstall Unnecessary Software
+      - name: Uninstall Unnecessary Software
         run: |
-          # ─── 清理 WinSxS 组件存储 ───
-          Write-Host "=== [1/4] Cleaning WinSxS component store ==="
-          Dism.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase
-          
-          Write-Host "=== [2/4] Analyzing component store after cleanup ==="
-          Dism.exe /online /Cleanup-Image /AnalyzeComponentStore
-          
-          # ─── 清理 Windows Update 缓存 ───
-          Write-Host "=== [3/4] Cleaning Windows Update cache ==="
-          Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-          if (Test-Path "C:\Windows\SoftwareDistribution") {
-              Remove-Item "C:\Windows\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue
-              Write-Host "SoftwareDistribution cache cleaned."
-          }
-          Start-Service -Name wuauserv -ErrorAction SilentlyContinue
-          
           # ─── 卸载不必要的软件 ───
-          Write-Host "=== [4/4] Uninstalling unnecessary software ==="
+          Write-Host "=== Uninstalling unnecessary software ==="
           
           # Helper: 从注册表查找并静默卸载软件
           function Uninstall-Software($namePattern) {
@@ -454,6 +438,87 @@ jobs:
           }
           
           Write-Host "llama.cpp server started on port 8080."
+      - name: Download MiniCPM5-1B GGUF Model
+        run: |
+          Write-Host "Downloading MiniCPM5-1B-F16.gguf from Hugging Face..."
+
+          $modelDir = "$env:LOCALAPPDATA\llama-app\models"
+          $null = New-Item -Path $modelDir -ItemType Directory -Force
+
+          $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
+          $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
+
+          # 使用 Invoke-WebRequest 下载，支持断点续传的大文件下载
+          $retries = 0
+          $maxRetries = 3
+          $downloaded = $false
+
+          while (-not $downloaded -and $retries -lt $maxRetries) {
+              try {
+                  Write-Host "  Attempt $($retries + 1) of $maxRetries..."
+                  # 先尝试获取文件大小
+                  $response = Invoke-WebRequest -Uri $modelUrl -Method Head -UseBasicParsing
+                  $totalSize = $response.Headers["Content-Length"] | Select-Object -First 1
+                  if ($totalSize) {
+                      $totalMB = [math]::Round([int64]$totalSize / 1MB, 2)
+                      Write-Host "  Remote file size: $totalMB MB"
+                  }
+
+                  # 使用 WebClient 下载（支持大文件，避免内存溢出）
+                  $wc = New-Object System.Net.WebClient
+                  $wc.DownloadFile($modelUrl, $modelPath)
+                  $wc.Dispose()
+
+                  # 验证文件
+                  if (Test-Path $modelPath) {
+                      $localSize = (Get-Item $modelPath).Length
+                      $localMB = [math]::Round($localSize / 1MB, 2)
+                      Write-Host "  Downloaded successfully! Local size: $localMB MB"
+                      
+                      # 如果服务器返回了大小，校验一下
+                      if ($totalSize -and $localSize -eq [int64]$totalSize) {
+                          Write-Host "  Size verification passed."
+                          $downloaded = $true
+                      } elseif ($totalSize) {
+                          Write-Warning "  Size mismatch: expected $totalSize, got $localSize. Retrying..."
+                          Remove-Item $modelPath -Force -ErrorAction SilentlyContinue
+                      } else {
+                          Write-Host "  Could not verify size (no Content-Length header), assuming success."
+                          $downloaded = $true
+                      }
+                  } else {
+                      Write-Warning "  Downloaded file not found at expected path."
+                  }
+              } catch {
+                  Write-Warning "  Download failed: $_"
+              }
+              $retries++
+          }
+
+          if (-not $downloaded) {
+              Write-Error "Failed to download MiniCPM5-1B-F16.gguf after $maxRetries attempts"
+              exit 1
+          }
+
+          Write-Host "Model downloaded to: $modelPath"
+          
+          # 验证模型文件是否可用（用 llama.cpp 的 --check-tensors 或简单检查文件头）
+          $llamaPath = & where.exe llama.exe 2>$null
+          if (-not $llamaPath) {
+              $llamaPath = "$env:LOCALAPPDATA\Programs\llama\llama.exe"
+          }
+          if (Test-Path $llamaPath) {
+              Write-Host "Verifying model with llama.cpp..."
+              # 使用 llama.cpp 的 --no-load 或简单检查 GGUF 文件头
+              & $llamaPath --model $modelPath --no-load --no-prompt 2>$null
+              if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1) {
+                  Write-Host "Model verification passed!"
+              } else {
+                  Write-Warning "Model verification returned exit code $LASTEXITCODE (may not be critical)"
+              }
+          }
+
+          Write-Host "MiniCPM5-1B-F16.gguf download and verification completed!"
       - name: Maintain Connection
         env:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
