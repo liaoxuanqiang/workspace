@@ -436,115 +436,31 @@ jobs:
           Write-Host "TCP connectivity successful!"
       - name: Install and Start llama.cpp
         run: |
-          Write-Host "Installing llama.cpp..."
+          Write-Host "Installing llama.cpp via winget..."
 
-          # ── 方法 1: 通过 llama.app 官方安装脚本 ──
-          function Install-FromLlamaApp {
-              Write-Host "  Method 1: llama.app installer..."
-              $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
-              try {
-                  $installScript = Invoke-RestMethod -Uri "https://llama.app/install.ps1" -ErrorAction Stop
-                  Invoke-Expression $installScript
-                  return $true
-              } catch {
-                  Write-Warning "  llama.app installer failed: $_"
-                  return $false
-              }
+          # ── winget 安装 llama.cpp ──
+          $proc = Start-Process -FilePath "winget" -ArgumentList "install", "llama.cpp", "--accept-package-agreements", "--silent", "--disable-interactivity" -NoNewWindow -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+              Write-Error "winget install llama.cpp failed with exit code $($proc.ExitCode)"
+              exit 1
           }
+          Write-Host "llama.cpp installed via winget."
 
-          # ── 方法 2: 通过 winget 安装 ──
-          function Install-FromWinget {
-              Write-Host "  Method 2: winget install llama.cpp..."
-              try {
-                  $proc = Start-Process -FilePath "winget" -ArgumentList "install", "llama.cpp", "--accept-package-agreements", "--silent", "--disable-interactivity" -NoNewWindow -Wait -PassThru
-                  if ($proc.ExitCode -eq 0) {
-                      # 刷新 PATH 以便找到新安装的 llama.exe
-                      $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
-                      return $true
-                  } else {
-                      Write-Warning "  winget install exited with code $($proc.ExitCode)"
-                      return $false
-                  }
-              } catch {
-                  Write-Warning "  winget install failed: $_"
-                  return $false
-              }
-          }
+          # 刷新 PATH
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
 
-          # ── 方法 3: 从 GitHub Releases 下载预编译包 ──
-          function Install-FromGitHub {
-              Write-Host "  Method 3: GitHub Releases..."
-              # 先获取最新 release 的 tag
-              try {
-                  $release = Invoke-RestMethod "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest" -ErrorAction Stop
-                  $tag = $release.tag_name
-                  Write-Host "  Latest release: $tag"
-              } catch {
-                  Write-Warning "  Failed to query GitHub releases: $_"
-                  Write-Warning "  Falling back to a known stable version."
-                  $tag = "b5024"
-              }
-
-              # 下载 Windows 版预编译包（包含 llama-server.exe / llama-cli.exe / llama.exe）
-              $zipUrl = "https://github.com/ggerganov/llama.cpp/releases/download/$tag/llama-$tag-bin-win-cuda-x64.zip"
-              $zipPath = "$env:TEMP\llama-cpp.zip"
-              $extractDir = "$env:LOCALAPPDATA\Programs\llama"
-              
-              try {
-                  Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -ErrorAction Stop
-                  Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-                  Remove-Item $zipPath -Force
-                  
-                  # 期望解压后里面有 llama-server.exe 或 llama.exe
-                  if (Test-Path "$extractDir\llama-server.exe") {
-                      # 某些版本主程序叫 llama-server.exe，创建别名
-                      Copy-Item "$extractDir\llama-server.exe" "$extractDir\llama.exe" -Force
-                  } elseif (-not (Test-Path "$extractDir\llama.exe")) {
-                      # 搜索任何可用的 exe
-                      $anyExe = Get-ChildItem "$extractDir\*.exe" | Select-Object -First 1
-                      if ($anyExe) {
-                          Copy-Item $anyExe.FullName "$extractDir\llama.exe" -Force
-                      }
-                  }
-                  
-                  # 加入 PATH
-                  $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-                  if ($currentPath -notlike "*$extractDir*") {
-                      [Environment]::SetEnvironmentVariable('Path', "$currentPath;$extractDir", 'Machine')
-                  }
-                  $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
-                  return $true
-              } catch {
-                  Write-Warning "  GitHub release download failed: $_"
-                  return $false
-              }
-          }
-
-          # ── 按顺序尝试安装 ──
-          $llamaInstalled = Install-FromLlamaApp
-          if (-not $llamaInstalled) {
-              $llamaInstalled = Install-FromWinget
-          }
-          if (-not $llamaInstalled) {
-              $llamaInstalled = Install-FromGitHub
-          }
-
-          # ── 验证 llama.exe ──
+          # ── 查找 llama.exe ──
           $llamaPath = & where.exe llama.exe 2>$null
           if (-not $llamaPath) {
-              $llamaPath = "$env:LOCALAPPDATA\Programs\llama\llama.exe"
-          }
-          if (-not $llamaPath -or -not (Test-Path $llamaPath)) {
-              # 最后再搜一遍注册的 PATH
               $llamaPath = (Get-Command llama.exe -ErrorAction SilentlyContinue).Source
           }
           if (-not $llamaPath -or -not (Test-Path $llamaPath)) {
-              Write-Error "llama.exe not found after all installation attempts"
+              Write-Error "llama.exe not found after winget install"
               exit 1
           }
-          Write-Host "llama.cpp installed successfully. Path: $llamaPath"
-          
-          # 将 llama 目录写入系统 PATH（RDP 登录后也能直接用 llama 命令）
+          Write-Host "llama.cpp installed. Path: $llamaPath"
+
+          # 将 llama 目录写入系统 PATH
           $llamaDir = Split-Path $llamaPath -Parent
           $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
           if ($currentPath -notlike "*$llamaDir*") {
@@ -552,24 +468,19 @@ jobs:
               Write-Host "Added $llamaDir to system PATH."
           }
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
-          
-          # 启动 llama.exe serve 作为独立进程（监听 0.0.0.0:8080，可通过 Tailscale 访问）
+
+          # ── 启动 llama.exe serve 监听 0.0.0.0:8080 ──
           Write-Host "Starting llama.exe serve on 0.0.0.0:8080..."
           $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
-          $startArgs = "serve --port 8080 --host 0.0.0.0"
-          if (Test-Path "$llamaDir\llama-server.exe") {
-              $serverExe = "$llamaDir\llama-server.exe"
-          } else {
-              $serverExe = $llamaPath
-          }
-          # 用 Start-Process 启动独立进程，继承到后续 step
-          $proc = Start-Process -FilePath $serverExe -ArgumentList $startArgs -NoNewWindow -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
+          $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
+
+          # winget 安装的 llama.cpp 主程序是 llama.exe，serve 子命令启动 server
+          $proc = Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0" -NoNewWindow -PassThru -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
           Write-Host "  PID: $($proc.Id), log: $llamaLog"
-          
-          # 等 5 秒确认服务启动
+
+          # 等待 5 秒确认服务启动
           Start-Sleep -Seconds 5
-          
-          # 检查服务是否在监听
+
           $netstatResult = netstat -an | Select-String ":8080.*LISTENING"
           if ($netstatResult) {
               Write-Host "llama.cpp serve is listening on 0.0.0.0:8080."
@@ -585,7 +496,7 @@ jobs:
                   Start-Sleep -Seconds 10
               }
           }
-          
+
           Write-Host "llama.cpp server started on 0.0.0.0:8080."
       - name: Download MiniCPM5-1B GGUF Model
         run: |
