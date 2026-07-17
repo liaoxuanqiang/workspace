@@ -566,7 +566,11 @@ jobs:
           # 验证模型文件是否可用（用 llama.cpp 的 --check-tensors 或简单检查文件头）
           $llamaPath = & where.exe llama.exe 2>$null
           if (-not $llamaPath) {
-              $llamaPath = "$env:LOCALAPPDATA\Programs\llama\llama.exe"
+              $llamaPath = (Get-Command llama.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $llamaPath -or -not (Test-Path $llamaPath)) {
+              # winget 安装路径兜底
+              $llamaPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama.exe"
           }
           if (Test-Path $llamaPath) {
               Write-Host "Verifying model with llama.cpp..."
@@ -588,16 +592,36 @@ jobs:
           RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address (Tailscale IP): $env:TAILSCALE_IP"
+          Write-Host "`n=== RDP + llama.cpp 服务已就绪 ==="
+          Write-Host "RDP Address (Tailscale IP): $env:TAILSCALE_IP"
           if ($env:TAILSCALE_DNS) {
-              Write-Host "Address (MagicDNS):    $env:TAILSCALE_DNS"
+              Write-Host "RDP Address (MagicDNS):    $env:TAILSCALE_DNS"
           }
+          Write-Host "llama.cpp API:              http://$env:TAILSCALE_IP`:8080"
           Write-Host "Username: $env:RDP_USERNAME"
           Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
-          
-          # 保持 runner 持续运行（或直到手动取消）
+          Write-Host "===================================`n"
+
+          # 检查 llama.cpp 服务是否还在运行
+          $llamaProc = Get-Process -Name "llama" -ErrorAction SilentlyContinue
+          if (-not $llamaProc) { $llamaProc = Get-Process -Name "llama-server" -ErrorAction SilentlyContinue }
+          if ($llamaProc) {
+              Write-Host "llama.cpp serve 进程正在运行 (PID: $($llamaProc.Id))，无需重复启动。"
+          } else {
+              Write-Warning "llama.cpp serve 进程未运行，尝试重启..."
+              $llamaPath = & where.exe llama.exe 2>$null
+              if (-not $llamaPath) {
+                  $llamaPath = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama.exe"
+              }
+              if (Test-Path $llamaPath) {
+                  $llamaLog = "$env:LOCALAPPDATA\llama-app\llama-server.log"
+                  $null = New-Item -Path "$env:LOCALAPPDATA\llama-app" -ItemType Directory -Force
+                  Start-Process -FilePath $llamaPath -ArgumentList "serve --port 8080 --host 0.0.0.0" -WindowStyle Hidden -RedirectStandardOutput $llamaLog -RedirectStandardError "$llamaLog.err"
+                  Write-Host "  Restarted llama.cpp serve on 0.0.0.0:8080."
+              }
+          }
+
+          # 保持 runner 持续运行
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
