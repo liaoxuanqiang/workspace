@@ -85,14 +85,14 @@ jobs:
           }
 
           # 杀掉所有需要停止的进程
-          Stop-SoftwareProcesses -ServiceNames @("UnityHub", "AzureCosmosDBEmulator", "FabricHostSvc", "FabricInstallerSvc", "FabricGatewaySvc", "FabricApplicationSvc") -ProcessNames @("chrome", "firefox", "Unity Hub", "Unity", "R", "Rgui", "Rscript", "RTerm", "gcc", "make", "sh", "rtools", "aws", "sam", "az", "CosmosDB.Emulator", "FabricHost", "Fabric", "FabricDeployer", "session-manager-plugin")
+          Stop-SoftwareProcesses -ServiceNames @("UnityHub") -ProcessNames @("chrome", "firefox", "Unity Hub", "Unity", "R", "Rgui", "Rscript", "RTerm", "gcc", "make", "sh", "rtools")
 
           # 先杀掉所有残留的 msiexec 进程，释放 MSI 锁
           Get-Process -Name "msiexec" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
-          # ── Phase 1: 非 MSI 软件（可真正并行，每个设 60s 超时防挂起） ──
-          Write-Host "--- Phase 1: Non-MSI (parallel) ---"
+          # ── 并行卸载非 MSI 软件（Chrome / Firefox / Unity Hub） ──
+          Write-Host "--- Parallel uninstall: Chrome, Firefox, Unity Hub ---"
 
           $chromeJob = Start-Job -Name "Chrome" -ScriptBlock {
               $items = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
@@ -140,8 +140,8 @@ jobs:
           $chromeJob, $firefoxJob, $unityJob | Wait-Job | Out-Null
           $chromeJob, $firefoxJob, $unityJob | Receive-Job
 
-          # ── Phase 2: MSI 软件（串行 — msiexec 有全局互斥锁，逐个跑更快） ──
-          Write-Host "--- Phase 2: MSI (sequential — msiexec serializes anyway) ---"
+          # ── 串行卸载 MSI 软件（msiexec 有全局互斥锁，逐个跑更快） ──
+          Write-Host "--- Sequential MSI uninstall (R for Windows, Rtools) ---"
 
           function Uninstall-Msi($namePattern, $timeoutSeconds = 120) {
               $keys = @(
@@ -177,7 +177,6 @@ jobs:
                       } else {
                           Write-Warning "  Timed out after ${timeoutSeconds}s, killing process."
                           $p.Kill()
-                          # 重置 MSI Installer 状态
                           Start-Sleep -Seconds 2
                       }
                   }
@@ -185,7 +184,6 @@ jobs:
                       Write-Warning "  $($item.DisplayName) 卸载失败（已重试 3 次）。"
                   }
               }
-              # 处理非 MSI 安装（InnoSetup 等），通过 UninstallString 直接运行
               $nonMsiItems = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
                   Where-Object { $_.DisplayName -like $namePattern -and $_.PSChildName -notmatch '^\{' -and $_.UninstallString }
               foreach ($item in $nonMsiItems) {
@@ -200,15 +198,6 @@ jobs:
           }
 
           Uninstall-Msi -namePattern 'R for Windows*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'AWS Command Line Interface*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'Microsoft Azure CLI*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'AWS SAM*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'Session Manager Plugin*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'Azure Cosmos DB Emulator*' -timeoutSeconds 120
-          Uninstall-Msi -namePattern 'Microsoft Azure Service Fabric SDK*' -timeoutSeconds 120
-
-          # ── Phase 3: 慢速卸装后台跑（不阻塞后续步骤） ──
-          Write-Host "--- Phase 3: Slow uninstallers (background, non-blocking) ---"
 
           # Rtools（已知很慢，后台不阻塞）
           $rtoolsItems = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
@@ -219,13 +208,6 @@ jobs:
                   Start-Process msiexec.exe -ArgumentList "/x $($item.PSChildName) /quiet /norestart" -NoNewWindow
               }
           } else { Write-Host "  Rtools not found, skipping." }
-
-          # CleanFabric（Azure Service Fabric 清理）
-          $cleanFabricPath = "C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\CleanFabric.ps1"
-          if (Test-Path $cleanFabricPath) {
-              Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$cleanFabricPath`"" -WindowStyle Hidden
-              Write-Host "  Azure Service Fabric 卸载已在后台启动。"
-          }
 
           Write-Host "Cleanup completed!"
       - name: Install Tailscale, Authenticate, Configure & Parallel Model Download
