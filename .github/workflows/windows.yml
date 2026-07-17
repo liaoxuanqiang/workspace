@@ -373,50 +373,21 @@ jobs:
           }
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
 
-          # ── 使用 llama download 下载模型到共享路径（替换旧版 WebClient 下载） ──
+          # ── 使用 llama download 下载模型到共享路径 ──
           Write-Host "Downloading MiniCPM5-1B-F16.gguf via llama download..."
 
           $modelDir = "C:\ProgramData\llama-models"
           $null = New-Item -Path $modelDir -ItemType Directory -Force
-          # 确保 Everyone 可读
           icacls $modelDir /grant "Everyone:(OI)(CI)R" /T /Q 2>$null
-
           $modelPath = "$modelDir\MiniCPM5-1B-F16.gguf"
 
-          # 先启动 serve 服务（暂不加载模型），然后并行下载
-          # 步骤 1: 注册 Windows 服务（不含 --model，先让服务跑起来）
-          Write-Host "Step 1: Registering llama service (without model)..."
-
-          $llamaLog = "$env:ProgramData\llama-models\llama-server.log"
-          $null = New-Item -Path "$env:ProgramData\llama-models" -ItemType Directory -Force
-
-          $existing = Get-Service -Name "llama" -ErrorAction SilentlyContinue
-          if ($existing) {
-              sc.exe stop llama 2>$null
-              sc.exe delete llama 2>$null
-              Start-Sleep -Seconds 2
-          }
-
-          # 第一次注册：不带 --model，仅启动 HTTP 端口
-          $binaryPathNoModel = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0"
-          New-Service -Name "llama" `
-              -BinaryPathName $binaryPathNoModel `
-              -StartupType Automatic `
-              -DisplayName "llama.cpp Server" `
-              -Description "llama.cpp inference server"
-          sc.exe failure llama reset= 86400 actions= restart/5000/restart/10000/restart/30000
-          sc.exe start llama
-          Write-Host "  llama service started (no model)."
-
-          # 步骤 2: 使用 llama download 命令下载模型
-          Write-Host "Step 2: Downloading model with 'llama download'..."
+          # llama download 下载模型（带 fallback 到 WebClient）
+          Write-Host "Running: llama download --hf-repo openbmb/MiniCPM5-1B-GGUF --hf-file MiniCPM5-1B-F16.gguf --output-dir $modelDir"
           & $llamaPath download --hf-repo openbmb/MiniCPM5-1B-GGUF --hf-file MiniCPM5-1B-F16.gguf --output-dir "$modelDir"
           $downloadExit = $LASTEXITCODE
 
           if ($downloadExit -ne 0 -or -not (Test-Path $modelPath) -or (Get-Item $modelPath).Length -eq 0) {
-              Write-Warning "  llama download failed (exit: $downloadExit). Model file: $(if(Test-Path $modelPath){'exists but may be invalid'}else{'not found'})"
-              # 回退：用 WebClient 下载
-              Write-Host "  Falling back: downloading with WebClient..."
+              Write-Warning "  llama download failed (exit: $downloadExit), falling back to WebClient..."
               $modelUrl = "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-F16.gguf"
               $retries = 0; $maxRetries = 3; $downloaded = $false
               while (-not $downloaded -and $retries -lt $maxRetries) {
@@ -433,22 +404,25 @@ jobs:
                   $retries++
               }
               if (-not $downloaded) { Write-Error "Model download failed after fallback."; exit 1 }
-          } else {
-              $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
-              Write-Host "  Model downloaded via llama download! Size: $localMB MB"
           }
-          Write-Host "Model ready at: $modelPath"
+          $localMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+          Write-Host "Model ready at: $modelPath ($localMB MB)"
 
-          # 步骤 3: 停止服务，更新二进制路径以包含 --model，重新启动
-          Write-Host "Step 3: Updating service to load model..."
-          sc.exe stop llama
-          Start-Sleep -Seconds 3
-          sc.exe delete llama
-          Start-Sleep -Seconds 2
+          # ── 注册 Windows 服务（带 --model） ──
+          Write-Host "Registering llama.cpp serve as Windows service..."
+          $llamaLog = "$env:ProgramData\llama-models\llama-server.log"
+          $null = New-Item -Path "$env:ProgramData\llama-models" -ItemType Directory -Force
 
-          $binaryPathWithModel = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0 --model `"$modelPath`""
+          $existing = Get-Service -Name "llama" -ErrorAction SilentlyContinue
+          if ($existing) {
+              sc.exe stop llama 2>$null
+              sc.exe delete llama 2>$null
+              Start-Sleep -Seconds 2
+          }
+
+          $binaryPath = "`"$llamaPath`" serve --port 8080 --host 0.0.0.0 --model `"$modelPath`""
           New-Service -Name "llama" `
-              -BinaryPathName $binaryPathWithModel `
+              -BinaryPathName $binaryPath `
               -StartupType Automatic `
               -DisplayName "llama.cpp Server" `
               -Description "llama.cpp inference server with MiniCPM5-1B model"
