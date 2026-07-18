@@ -254,11 +254,14 @@ jobs:
           Write-Host "OpenSSH Server ready."
 
           # ════════════════════════════════════════════
-          # 3. 认证 Tailscale（启用 SSH）
+          # 3. 认证 Tailscale
           # ════════════════════════════════════════════
           if ("$env:TAILSCALE_AUTH_KEY" -eq "") { Write-Error "TAILSCALE_AUTH_KEY missing"; exit 1 }
           Write-Host "Authenticating Tailscale..."
-          & "$tsPath\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=windows --ssh
+          # 注意：Tailscale SSH（--ssh）仅支持 Linux/macOS 服务端，
+          # Windows 上不生效。参见 https://tailscale.com/kb/1193/tailscale-ssh
+          # Windows 上的 SSH 使用传统的 OpenSSH over Tailscale 网络
+          & "$tsPath\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=windows
           
           # 等待 Tailscale 分配 IP
           $tsIP = $null
@@ -323,7 +326,7 @@ jobs:
           }
 
           # ════════════════════════════════════════════
-          # 5. 子网路由 + Exit Node + SSH
+          # 5. 子网路由 + Exit Node
           # ════════════════════════════════════════════
           $localIPs = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' -and $_.InterfaceAlias -ne 'Tailscale' }
           $subnets = @()
@@ -337,15 +340,14 @@ jobs:
               [Array]::Reverse($netBytes)
               $subnets += "$([System.Net.IPAddress]::new($netBytes).IPAddressToString)/$($ip.PrefixLength)"
           }
-          Write-Host "Configuring Tailscale with --ssh..."
-          & "$tsPath\tailscale.exe" set --advertise-routes="$($subnets -join ',')" --advertise-exit-node --accept-routes --accept-dns=false --ssh
+          Write-Host "Configuring Tailscale..."
+          & "$tsPath\tailscale.exe" set --advertise-routes="$($subnets -join ',')" --advertise-exit-node --accept-routes --accept-dns=false
           if ($LASTEXITCODE -ne 0) { Write-Warning "tailscale set 返回 $LASTEXITCODE（需控制台审批）" }
-          else { Write-Host "  tailscale set --ssh OK" }
 
-          # 验证 Tailscale SSH 状态
-          $sshStatus = & "$tsPath\tailscale.exe" status --json 2>$null | ConvertFrom-Json
-          if ($sshStatus.Self.SSHEnabled -eq $true) { Write-Host "  Tailscale SSH: 已启用 ✓" }
-          else { Write-Warning "  Tailscale SSH 未启用（可能在控制台中仍需审批）" }
+          # 验证 OpenSSH Server 是否正在监听 22 端口
+          $sshListening = netstat -an | Select-String ":22.*LISTENING"
+          if ($sshListening) { Write-Host "  OpenSSH Server (端口 22) 已在监听 ✓" }
+          else { Write-Warning "  OpenSSH Server 未在监听，请检查 sshd 服务状态" }
 
           Write-Host "Tailscale 配置完成！IP: $tsIP"
 
