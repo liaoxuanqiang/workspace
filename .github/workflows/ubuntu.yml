@@ -17,9 +17,15 @@ jobs:
           # 更新 apt 索引
           sudo apt-get update -y
 
-          # 安装 Xfce4 轻量桌面环境（最小化安装，避免拉一堆无用软件）
-          sudo apt-get install -y --no-install-recommends \
-            xfce4 xfce4-terminal xfce4-taskmanager
+          # 检查是否已有桌面环境，如已安装则跳过 xfce4 安装
+          if command -v xfce4-session >/dev/null 2>&1 || command -v gnome-session >/dev/null 2>&1 || command -v startplasma >/dev/null 2>&1 || [ -f /usr/bin/xfce4-session ]; then
+            echo "Desktop environment already installed, skipping xfce4 installation."
+          else
+            echo "No desktop environment detected, installing Xfce4..."
+            # 安装 Xfce4 轻量桌面环境（最小化安装，避免拉一堆无用软件）
+            sudo apt-get install -y --no-install-recommends \
+              xfce4 xfce4-terminal xfce4-taskmanager
+          fi
 
           # 安装 TigerVNC Server（VNC 后端）
           sudo apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-common
@@ -47,9 +53,9 @@ jobs:
           fi
 
           # 创建 Linux 用户，设置密码，添加到 sudo 组
-          useradd -m -s /bin/bash "$VNC_USERNAME"
-          echo "$VNC_USERNAME:$VNC_PASSWORD" | chpasswd
-          usermod -aG sudo "$VNC_USERNAME"
+          sudo useradd -m -s /bin/bash "$VNC_USERNAME"
+          echo "$VNC_USERNAME:$VNC_PASSWORD" | sudo chpasswd
+          sudo usermod -aG sudo "$VNC_USERNAME"
 
           echo "User '$VNC_USERNAME' created and added to sudo group."
           echo "VNC_USERNAME=$VNC_USERNAME" >> "$GITHUB_ENV"
