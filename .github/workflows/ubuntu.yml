@@ -42,34 +42,33 @@ jobs:
           VNC_USERNAME: ${{ secrets.VNC_USERNAME }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
-          # 验证 VNC_USERNAME 是否已配置
           if [ -z "$VNC_USERNAME" ]; then
             echo "::error::VNC_USERNAME is not configured in GitHub Secrets. Please add it."
             exit 1
           fi
-          if [ -z "$VNC_PASSWORD" ]; then
-            echo "::error::VNC_PASSWORD is not configured in GitHub Secrets. Please add it."
-            exit 1
-          fi
-
-          # 创建 Linux 用户，设置密码，添加到 sudo 组
+          # Create user with home directory
           sudo useradd -m -s /bin/bash "$VNC_USERNAME"
+          # Set password to match VNC_PASSWORD
           echo "$VNC_USERNAME:$VNC_PASSWORD" | sudo chpasswd
+          # Add to sudo group for convenience
           sudo usermod -aG sudo "$VNC_USERNAME"
-
-          echo "User '$VNC_USERNAME' created and added to sudo group."
-          echo "VNC_USERNAME=$VNC_USERNAME" >> "$GITHUB_ENV"
+          # Create user runtime directory
+          sudo mkdir -p /run/user/$(id -u "$VNC_USERNAME")
+          sudo chmod 700 /run/user/$(id -u "$VNC_USERNAME")
+          echo "User $VNC_USERNAME created successfully."
 
       - name: Configure TigerVNC server
         env:
           VNC_USERNAME: ${{ secrets.VNC_USERNAME }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
-          # 验证 VNC_USERNAME 和 VNC_PASSWORD 是否已配置
+          # 验证 VNC_USERNAME 是否已配置
           if [ -z "$VNC_USERNAME" ]; then
-            echo "::error::VNC_USERNAME is not configured in GitHub Secrets."
+            echo "::error::VNC_USERNAME is not configured in GitHub Secrets. Please add it."
             exit 1
           fi
+
+          # 验证 VNC_PASSWORD 是否已配置
           if [ -z "$VNC_PASSWORD" ]; then
             echo "::error::VNC_PASSWORD is not configured in GitHub Secrets. Please add it."
             exit 1
@@ -82,12 +81,12 @@ jobs:
           # 获取 VNC 用户的家目录
           VNC_USER_HOME=$(eval echo ~$VNC_USERNAME)
 
-          # 创建 .vnc 目录
-          sudo mkdir -p "$VNC_USER_HOME/.vnc"
+          # 创建用户 .vnc 目录
+          sudo -u "$VNC_USERNAME" mkdir -p "$VNC_USER_HOME/.vnc"
 
           # 预创建用户运行时目录（避免 XFCE session 报错）
-          sudo mkdir -p /run/user/"$(id -u "$VNC_USERNAME")"
-          sudo chmod 700 /run/user/"$(id -u "$VNC_USERNAME")"
+          sudo mkdir -p /run/user/$(id -u "$VNC_USERNAME")
+          sudo chmod 700 /run/user/$(id -u "$VNC_USERNAME")
 
           # 使用 vncpasswd 生成 VNC 密码文件
           printf '%s' "$VNC_PASSWORD" | sudo vncpasswd -f | sudo tee "$VNC_USER_HOME/.vnc/passwd" > /dev/null
@@ -99,9 +98,13 @@ jobs:
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
           export XDG_SESSION_TYPE=x11
+          export XDG_CONFIG_DIRS="/etc/xdg"
 
-          # 设置用户运行时目录（解决 dbus/XFCE session 错误）
-          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          VNC_USER="$(whoami)"
+          USER_UID=$(id -u "$VNC_USER")
+
+          # 设置用户运行时目录
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USER_UID}"
           if [ ! -d "$XDG_RUNTIME_DIR" ]; then
             mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
             chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
@@ -114,7 +117,6 @@ jobs:
 
           exec startxfce4
           XSTARTUP
-          sudo chmod 755 "$VNC_USER_HOME/.vnc/xstartup"
 
           # 写入 VNC 配置（分辨率、色深、仅监听 localhost）
           sudo tee "$VNC_USER_HOME/.vnc/config" << 'VNCCONFIG' > /dev/null
@@ -123,7 +125,7 @@ jobs:
           localhost=yes
           VNCCONFIG
 
-          # 确保 .vnc 目录所有权归 VNC 用户
+          # 确保 .vnc 目录及所有文件属于 VNC 用户
           sudo chown -R "$VNC_USERNAME:$VNC_USERNAME" "$VNC_USER_HOME/.vnc"
 
           # 让 VNC 监听 localhost（noVNC/websockify 会转发）
