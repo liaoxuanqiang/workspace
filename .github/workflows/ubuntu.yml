@@ -118,6 +118,9 @@ jobs:
           exec startxfce4
           XSTARTUP
 
+          # 使 xstartup 脚本可执行
+          sudo chmod +x "$VNC_USER_HOME/.vnc/xstartup"
+
           # 写入 VNC 配置（分辨率、色深、仅监听 localhost）
           sudo tee "$VNC_USER_HOME/.vnc/config" << 'VNCCONFIG' > /dev/null
           geometry=1280x720
@@ -144,7 +147,8 @@ jobs:
           VNC_USER_HOME=$(eval echo ~$VNC_USERNAME)
 
           # 以 VNC 用户身份启动 VNC，绑定到 localhost
-          sudo -u "$VNC_USERNAME" vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24
+          # 先切换到 VNC 用户家目录，避免 "cannot stat initial working directory" 权限错误
+          cd "$VNC_USER_HOME" && sudo -u "$VNC_USERNAME" vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24
 
           # 等待 VNC 端口就绪
           for i in $(seq 1 20); do
@@ -482,7 +486,8 @@ jobs:
             # 检查关键进程
             if ! pgrep -x vncserver >/dev/null 2>&1 && ! pgrep -f "Xvnc" >/dev/null 2>&1; then
               echo "::warning::VNC server process not found, attempting restart..."
-              sudo -u "$VNC_USERNAME" vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24 || true
+              VNC_USER_HOME=$(eval echo ~$VNC_USERNAME)
+              cd "$VNC_USER_HOME" && sudo -u "$VNC_USERNAME" vncserver "$VNC_DISPLAY" -localhost yes -geometry 1280x720 -depth 24 || true
             fi
             if ! pgrep -x websockify >/dev/null 2>&1; then
               echo "::warning::websockify process not found, attempting restart..."
