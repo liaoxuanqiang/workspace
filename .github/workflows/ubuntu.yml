@@ -256,30 +256,61 @@ jobs:
 
           # 1. 检查是否已有名为 "ubuntu" 的设备，如有则先取消授权并移除
           echo "Checking for existing device named 'ubuntu'..."
-          EXISTING_UBUNTU_IDS=$(echo "$DEVICES_JSON" | jq -r --arg ID "$DEVICE_ID" '.devices[] | select(.name == "ubuntu" and .id != $ID) | .id')
+          EXISTING_UBUNTU_IDS=$(echo "$DEVICES_JSON" | jq -r --arg ID "$DEVICE_ID" '.devices[] | select(.name == "ubuntu" and .id != ($ID | tonumber? // .)) | .id')
           if [ -n "$EXISTING_UBUNTU_IDS" ]; then
             echo "Found existing device(s) named 'ubuntu':"
             while IFS= read -r OLD_ID; do
               if [ -n "$OLD_ID" ]; then
                 echo "  Deauthorizing old device: $OLD_ID..."
-                curl -s -X POST "$API_BASE/device/$OLD_ID/deauthorize" \
+                curl -s -f -X POST "$API_BASE/device/$OLD_ID/deauthorize" \
                   -H "$AUTH_HEADER" || echo "::warning::Failed to deauthorize device $OLD_ID"
                 echo "  Removing old device: $OLD_ID..."
-                curl -s -X DELETE "$API_BASE/device/$OLD_ID" \
+                curl -s -f -X DELETE "$API_BASE/device/$OLD_ID" \
                   -H "$AUTH_HEADER" || echo "::warning::Failed to remove device $OLD_ID"
                 echo "  ✅ Device $OLD_ID removed."
               fi
             done <<< "$EXISTING_UBUNTU_IDS"
           else
-            echo "No existing device named 'ubuntu' found."
+            echo "No existing device named 'ubuntu' found via API."
           fi
 
-          # 3. 设置当前机器名为 "ubuntu"
-          echo "Setting machine name to 'ubuntu'..."
-          curl -s -X POST "$API_BASE/device/$DEVICE_ID/name" \
+          # 2. 尝试通过 API 重命名
+          echo "Setting machine name to 'ubuntu' via API..."
+          RENAME_RESULT=$(curl -s -f -X POST "$API_BASE/device/$DEVICE_ID/name" \
             -H "$AUTH_HEADER" \
             -H "Content-Type: application/json" \
-            -d '{"name":"ubuntu"}' || echo "::warning::Failed to set machine name"
+            -d '{"name":"ubuntu"}' 2>&1) || true
+          if echo "$RENAME_RESULT" | grep -q "already taken"; then
+            echo "::warning::Name 'ubuntu' already taken by another device."
+            echo "Trying to find and remove the conflicting device using Stable Node ID..."
+            # 通过 tailscale status --json 获取所有已知设备
+            ALL_KNOWN=$(sudo tailscale status --json 2>/dev/null | jq -r '.Peer // {} | to_entries[] | "\(.key) \(.value.HostName)"' 2>/dev/null || true)
+            if [ -n "$ALL_KNOWN" ]; then
+              OLD_NODE=$(echo "$ALL_KNOWN" | grep -i " ubuntu$" | head -1 | awk '{print $1}')
+              if [ -n "$OLD_NODE" ]; then
+                echo "Found conflicting device with Node ID: $OLD_NODE"
+                OLD_DEV_ID=$(echo "$DEVICES_JSON" | jq -r --arg NODE "$OLD_NODE" '.devices[] | select(.nodeId == $NODE) | .id')
+                if [ -n "$OLD_DEV_ID" ] && [ "$OLD_DEV_ID" != "null" ]; then
+                  echo "Deauthorizing device: $OLD_DEV_ID..."
+                  curl -s -f -X POST "$API_BASE/device/$OLD_DEV_ID/deauthorize" -H "$AUTH_HEADER" || true
+                  echo "Removing device: $OLD_DEV_ID..."
+                  curl -s -f -X DELETE "$API_BASE/device/$OLD_DEV_ID" -H "$AUTH_HEADER" || true
+                  echo "Retrying rename..."
+                  RENAME_RESULT=$(curl -s -f -X POST "$API_BASE/device/$DEVICE_ID/name" \
+                    -H "$AUTH_HEADER" \
+                    -H "Content-Type: application/json" \
+                    -d '{"name":"ubuntu"}' 2>&1) || true
+                  echo "Rename result: $RENAME_RESULT"
+                fi
+              fi
+            fi
+            if echo "$RENAME_RESULT" | grep -q "already taken"; then
+              echo "::warning::API rename still failed. Falling back to tailscale set --hostname=ubuntu..."
+              sudo tailscale set --hostname=ubuntu || echo "::warning::tailscale set --hostname also failed"
+            fi
+          else
+            echo "✅ Machine name set to 'ubuntu' via API."
+          fi
 
           # 4. 设置机器 IP：Tailscale CLI/API v2 不提供设置 IP 的接口
           #    Tailscale 自动分配 IP，如需固定 IP 请在 Admin Console 中设置
